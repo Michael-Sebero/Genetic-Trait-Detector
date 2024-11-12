@@ -3,7 +3,7 @@
 ```
 pip install colored
 
-git clone https://github.com/MichaelSebero/Genetic-Trait-Detector
+git clone https://github.com/michaelsebero/Genetic-Trait-Detector
 
 python3 /path/to/genetic-trait-detector.py
 ```
