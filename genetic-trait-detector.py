@@ -90,6 +90,7 @@ class Trait:
     anxiety = "Anxiety"
     depression = "Depression"
     addiction = "Addiction Risk"
+    misc = "Misc"
 
 # Unique colors for each trait (visible on black background)
 trait_colors = {
@@ -99,8 +100,8 @@ trait_colors = {
     Trait.immunity: Fore.RED,              # Red
     Trait.intelligence: Fore.CYAN,         # Cyan
     Trait.longevity: Fore.BLUE,            # Blue
-    Trait.metabolism: Fore.WHITE,          # White
-    Trait.muscle: Fore.LIGHTBLACK_EX,      # Gray (visible, replaces black)
+    Trait.metabolism: Fore.WHITE,          # Grey
+    Trait.muscle: Fore.LIGHTBLACK_EX,      # Dark Gray (visible, replaces black)
     Trait.ocd: Fore.LIGHTMAGENTA_EX,       # Light magenta
     Trait.schizophrenia: Fore.LIGHTYELLOW_EX,  # Light yellow
     Trait.eyes: Fore.LIGHTBLUE_EX,         # Light blue
@@ -108,6 +109,7 @@ trait_colors = {
     Trait.anxiety: Fore.LIGHTCYAN_EX,      # Light cyan
     Trait.depression: Fore.LIGHTGREEN_EX,  # Light green
     Trait.addiction: Fore.LIGHTWHITE_EX,   # Light white (replaces dark black)
+    Trait.misc: Fore.RESET,   # White
 }
 
 # Updated RSIDs list with corrections and new additions
@@ -150,12 +152,13 @@ _RSIDS = [
     ("rs1322784", "C;T", Trait.autism),
     ("rs1322784", "T;T", Trait.autism),
     ("rs265981", "A;G", Trait.autism),
-    ("rs4532", "C;T", Trait.autism),
     ("rs686", "A;G", Trait.autism),
     ("rs1143674", "A;A", Trait.autism),
     ("rs6807362", "C;C", Trait.autism),
     ("rs757972971", "A;A", Trait.autism),
     ("rs2217262", "A;A", Trait.autism),
+    ("rs2217262", "A;C", Trait.autism),
+    ("rs2217262", "C;C", Trait.autism),
     ("rs6766410", "A;A", Trait.autism),
     ("rs6766410", "A;C", Trait.autism),
     ("rs6766410", "C;C", Trait.autism),
@@ -175,15 +178,14 @@ _RSIDS = [
     ("rs722628", "A;G", Trait.autism),
     ("rs722628", "G;G", Trait.autism),
     ("rs1858830", "C;G", Trait.autism),
-    ("rs2710102", "G;G", Trait.autism),
     ("rs7794745", "T;T", Trait.autism),
     ("rs265981", "G;G", Trait.autism),
-    ("rs4532", "T;T", Trait.autism),
+    ("rs4532", "C;C", Trait.autism),
     ("rs686", "A;A", Trait.autism),
     ("rs1143674", "A;A", Trait.autism),
     ("rs757972971", "A;A", Trait.autism),
     ("rs10513025", "T;T", Trait.autism, "Linked to autism spectrum disorder risk"),   
-    ("rs1718101", "C;C", Trait.autism, "CNTNAP2 gene, associated with autism susceptibility"),   
+    ("rs1718101", "G;G", Trait.autism, "CNTNAP2 gene, associated with autism susceptibility"),   
 
     # Schizophrenia
     ("rs27388", "A;A", Trait.schizophrenia),
@@ -278,8 +280,7 @@ _RSIDS = [
     # OCD
     ("rs4570625", "G;G", Trait.ocd),
     ("rs4565946", "C;C", Trait.ocd),
-    ("rs6313", "A;A", Trait.ocd, "HTR2A, linked to obsessive-compulsive traits"),   
-    ("rs301430", "C;C", Trait.ocd, "SLC1A1, associated with OCD risk"),   
+    ("rs301430", "T;T", Trait.ocd, "SLC1A1, associated with OCD risk"),   
 
     # Metabolism
     ("rs1801131", "A;C", Trait.metabolism),
@@ -363,11 +364,12 @@ _RSIDS = [
     ("rs2378249", "G;G", Trait.hair, "PADI3, linked to hair texture"),   
 
     # Depression
-    ("rs6265", "C;C", Trait.depression, "BDNF Val66Met variant linked to depression risk"),
+    ("rs6265", "A;A", Trait.depression, "BDNF Val66Met variant linked to depression risk"),
+    ("rs6265", "A;G", Trait.depression, "BDNF Val66Met variant linked to depression risk"),
     ("rs25531", "T;T", Trait.depression, "SERT gene variant affecting serotonin transport"),
     ("rs1049353", "A;A", Trait.depression, "CNR1, associated with depression risk"),   
-    ("rs909525", "T;T", Trait.depression, "TPH2, linked to serotonin regulation"),   
-
+    ("rs6313", "T;T", Trait.depression),   
+    
     # Anxiety
     ("rs1360780", "T;T", Trait.anxiety, "FKBP5 variant associated with stress response"),
     ("rs3810366", "G;G", Trait.anxiety, "CRHR1 variant linked to stress response"),
@@ -383,6 +385,9 @@ _RSIDS = [
     ("rs16969968", "A;A", Trait.addiction, "CHRNA5 variant associated with nicotine dependence"),
     ("rs2832407", "A;A", Trait.addiction, "GRIK1, increases alcohol dependence risk"),   
     ("rs6277", "G;G", Trait.addiction, "DRD2, linked to reward sensitivity"),   
+    
+    # misc
+    ("rs909525", "G;G", Trait.misc, "Warrior Gene"),   
 ]
 
 RSIDS = [Rsid(*x) for x in _RSIDS]
