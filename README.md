@@ -1,7 +1,7 @@
 ## How to Install
 
 ```
-pip install colored
+pip install colorama
 
 git clone https://github.com/Michael-Sebero/Genetic-Trait-Detector
 
