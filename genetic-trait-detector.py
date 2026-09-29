@@ -7,19 +7,21 @@ plain or gzip/bzip2/zip compressed. Every database allele is stored on the GRCh3
 plus strand. Non-palindromic calls reported on the opposite strand are complemented;
 anything that fits neither orientation is reported as an allele conflict.
 
+The text report lists every database SNP found in the file, split into traits present
+and traits not present; every result title gets a colour no other title uses.
+
   genetic-trait-detector.py genome.zip
+  genetic-trait-detector.py genome.zip --snp rs1006737
   genetic-trait-detector.py genome.txt --format json > report.json
   genetic-trait-detector.py genome.txt --pgs PGS000001.txt.gz
   genetic-trait-detector.py --list
   genetic-trait-detector.py --selftest
-
-Research use only. Chip calls of rare variants are frequently false positives
-(Weedon 2021 BMJ 372:n214); confirm medically relevant results with a clinical test.
 """
 from __future__ import annotations
 
 import argparse
 import bz2
+import colorsys
 import gzip
 import io
 import json
@@ -32,8 +34,6 @@ import tempfile
 import textwrap
 import zipfile
 from dataclasses import dataclass, field
-
-__version__ = "2.0.0"
 
 CATEGORIES = {
     "appearance": ("Appearance & pigmentation", "33"),
@@ -52,7 +52,7 @@ EVIDENCE = {
     "C": "replicated association, small effect",
     "D": "functional variant, trait associations inconsistent",
 }
-EVIDENCE_SHORT = "A clinical grade | B strong, large effect | C replicated, small effect | D functional only"
+EVIDENCE_SHORT = "A clinical grade | B strong, large effect | C replicated, small effect | D weak"
 
 COMPLEMENT = str.maketrans("ACGT", "TGCA")
 BASES = frozenset("ACGTDI")
@@ -75,16 +75,19 @@ class Variant:
     levels: str = "000"
     rare: bool = False
     aliases: tuple = ()
+    trait: str = ""
+    has: str = "011"
 
     @property
     def palindromic(self) -> bool:
         return {self.ref, self.alt} in ({"A", "T"}, {"C", "G"})
 
 
-def _v(rsid, gene, cat, ref, alt, ev, text, src, loc="", hidden=False, levels="000", rare=False, aliases=()):
+def _v(rsid, gene, cat, ref, alt, ev, text, src, loc="", hidden=False, levels="000", rare=False, aliases=(),
+       trait="", has="011"):
     chrom, _, pos = loc.partition(":")
     return Variant(rsid, gene, cat, ref, alt, ev, tuple(text), src, chrom, int(pos or 0),
-                   hidden, levels, rare, tuple(aliases))
+                   hidden, levels, rare, tuple(aliases), trait, has)
 
 
 MC1R_SRC = "Valverde 1995 Nat Genet 11:328; Sulem 2007 Nat Genet 39:1443"
@@ -93,247 +96,279 @@ IRIS_SRC = "Walsh 2011 Forensic Sci Int Genet 5:170"
 DB = [
     _v("rs12913832", "HERC2", "appearance", "A", "G", "B",
        ("brown-eye genotype", "brown or intermediate (green/hazel) eyes most likely", "blue/light eyes expected"),
-       "Sturm 2008 Am J Hum Genet 82:424; Eiberg 2008 Hum Genet 123:177", "15:28365618"),
+       "Sturm 2008 Am J Hum Genet 82:424; Eiberg 2008 Hum Genet 123:177", "15:28365618",
+       trait="Blue/light eyes (HERC2)", has="001"),
     _v("rs1800407", "OCA2", "appearance", "C", "T", "C",
        ("no R419Q", "R419Q: shifts prediction from brown toward blue/intermediate", "R419Q homozygous"),
-       IRIS_SRC, "15:28230318", hidden=True),
+       IRIS_SRC, "15:28230318", hidden=True, trait="OCA2 R419Q", has="011"),
     _v("rs12896399", "SLC24A4", "appearance", "G", "T", "C",
        ("no light-pigmentation allele", "one allele associated with light eyes and hair",
         "two alleles associated with light eyes and hair"),
-       "Sulem 2007 Nat Genet 39:1443", "14:92773663", hidden=True),
+       "Sulem 2007 Nat Genet 39:1443", "14:92773663", hidden=True,
+       trait="Light eye/hair allele (SLC24A4)", has="011"),
     _v("rs16891982", "SLC45A2", "appearance", "C", "G", "B",
        ("374Leu/Leu: ancestral darker-pigmentation genotype, common outside Europe",
         "374Leu/Phe: one light-pigmentation allele",
         "374Phe/Phe: light-pigmentation genotype typical of Europeans"),
-       "Graf 2005 Hum Mutat 25:278; " + IRIS_SRC, "5:33951693"),
+       "Graf 2005 Hum Mutat 25:278; " + IRIS_SRC, "5:33951693",
+       trait="Light-pigmentation allele (SLC45A2 374Phe)", has="011"),
     _v("rs1393350", "TYR", "appearance", "G", "A", "C",
        ("no TYR light-eye allele", "blue vs green eyes OR 1.52 per A; more sun sensitivity",
         "blue vs green eyes OR 1.52 per A (two copies); more sun sensitivity"),
-       "Sulem 2007 Nat Genet 39:1443", "11:89011046", hidden=True),
+       "Sulem 2007 Nat Genet 39:1443", "11:89011046", hidden=True, trait="Light-eye allele (TYR)", has="011"),
     _v("rs12203592", "IRF4", "appearance", "C", "T", "C",
        ("no IRF4 effect allele", "more freckling and sun sensitivity",
         "more freckling and sun sensitivity (two alleles)"),
-       "Han 2008 PLoS Genet 4:e1000074; Praetorius 2013 Cell 155:1022", "6:396321"),
+       "Han 2008 PLoS Genet 4:e1000074; Praetorius 2013 Cell 155:1022", "6:396321",
+       trait="Freckling and sun sensitivity (IRF4)", has="011"),
     _v("rs1805006", "MC1R", "appearance", "C", "A", "B", ("no D84E", "D84E (R allele)", "D84E homozygous"),
-       MC1R_SRC, "16:89985918", hidden=True),
+       MC1R_SRC, "16:89985918", hidden=True, trait="MC1R D84E", has="011"),
     _v("rs11547464", "MC1R", "appearance", "G", "A", "B", ("no R142H", "R142H (R allele)", "R142H homozygous"),
-       MC1R_SRC, "16:89986091", hidden=True),
+       MC1R_SRC, "16:89986091", hidden=True, trait="MC1R R142H", has="011"),
     _v("rs1805007", "MC1R", "appearance", "C", "T", "B", ("no R151C", "R151C (R allele)", "R151C homozygous"),
-       MC1R_SRC, "16:89986117", hidden=True),
+       MC1R_SRC, "16:89986117", hidden=True, trait="MC1R R151C", has="011"),
     _v("rs1805008", "MC1R", "appearance", "C", "T", "B", ("no R160W", "R160W (R allele)", "R160W homozygous"),
-       MC1R_SRC, "16:89986144", hidden=True),
+       MC1R_SRC, "16:89986144", hidden=True, trait="MC1R R160W", has="011"),
     _v("rs1805009", "MC1R", "appearance", "G", "C", "B", ("no D294H", "D294H (R allele)", "D294H homozygous"),
-       MC1R_SRC, "16:89986546", hidden=True, aliases=("i3002507",)),
+       MC1R_SRC, "16:89986546", hidden=True, aliases=("i3002507",), trait="MC1R D294H", has="011"),
     _v("rs1805005", "MC1R", "appearance", "G", "T", "C", ("no V60L", "V60L (r allele)", "V60L homozygous"),
-       MC1R_SRC, "16:89985844", hidden=True),
+       MC1R_SRC, "16:89985844", hidden=True, trait="MC1R V60L", has="011"),
     _v("rs2228479", "MC1R", "appearance", "G", "A", "C", ("no V92M", "V92M (r allele)", "V92M homozygous"),
-       MC1R_SRC, "16:89985940", hidden=True),
+       MC1R_SRC, "16:89985940", hidden=True, trait="MC1R V92M", has="011"),
     _v("rs885479", "MC1R", "appearance", "G", "A", "C", ("no R163Q", "R163Q (r allele)", "R163Q homozygous"),
-       MC1R_SRC, "16:89986154", hidden=True),
+       MC1R_SRC, "16:89986154", hidden=True, trait="MC1R R163Q", has="011"),
     _v("rs12821256", "KITLG", "appearance", "T", "C", "C",
        ("no KITLG blond allele", "one blond-hair-associated allele", "two blond-hair-associated alleles"),
-       "Sulem 2007 Nat Genet 39:1443; Guenther 2014 Nat Genet 46:748", "12:89328335"),
+       "Sulem 2007 Nat Genet 39:1443; Guenther 2014 Nat Genet 46:748", "12:89328335",
+       trait="Blond-hair allele (KITLG)", has="011"),
     _v("rs35264875", "TPCN2", "appearance", "A", "T", "C",
        ("no M484L", "M484L: blond-hair-associated allele", "M484L homozygous: two blond-hair-associated alleles"),
-       "Sulem 2008 Nat Genet 40:835", "11:68846399"),
+       "Sulem 2008 Nat Genet 40:835", "11:68846399", trait="Blond-hair allele (TPCN2 M484L)", has="011"),
     _v("rs3829241", "TPCN2", "appearance", "G", "A", "C",
        ("no G734E", "G734E: blond-hair-associated allele", "G734E homozygous: two blond-hair-associated alleles"),
-       "Sulem 2008 Nat Genet 40:835", "11:68855363"),
+       "Sulem 2008 Nat Genet 40:835", "11:68855363", trait="Blond-hair allele (TPCN2 G734E)", has="011"),
     _v("rs11803731", "TCHH", "appearance", "T", "A", "C",
        ("no straight-hair allele (curlier hair more likely)", "one straight-hair allele",
         "two straight-hair alleles; most common European genotype (T/T in gene orientation)"),
-       "Medland 2009 Am J Hum Genet 85:750", "1:152083325"),
+       "Medland 2009 Am J Hum Genet 85:750", "1:152083325", trait="Straight-hair allele (TCHH)", has="011"),
     _v("rs3827760", "EDAR", "appearance", "A", "G", "B",
        ("370Val/Val: ancestral EDAR, typical in Europeans and Africans",
         "370Val/Ala: one hair-thickness allele",
         "370Ala/Ala: thick straight scalp hair; common in East Asians and Native Americans"),
-       "Fujimoto 2008 Hum Mol Genet 17:835; Kamberov 2013 Cell 152:691", "2:109513601"),
+       "Fujimoto 2008 Hum Mol Genet 17:835; Kamberov 2013 Cell 152:691", "2:109513601",
+       trait="Thick straight hair allele (EDAR 370Ala)", has="011"),
     _v("rs6152", "AR", "appearance", "G", "A", "C",
        ("common allele; higher odds of male-pattern baldness (G allele OR 2.68)",
         "one lower-risk A allele",
         "lower-risk A allele; A carriers were 24% of non-bald vs 7-13% of bald men"),
        "Hillmer 2005 Am J Hum Genet 77:140; Hayes 2005 Cancer Epidemiol Biomarkers Prev 14:993; "
        "Zhuo 2012 PMID 21981665",
-       "X:0"),
+       "X:0", trait="Male-pattern baldness risk allele (AR)", has="110"),
 
     _v("rs17822931", "ABCC11", "senses", "C", "T", "B",
        ("wet earwax", "wet earwax (dry-type carrier)", "dry earwax and reduced axillary odour"),
-       "Yoshiura 2006 Nat Genet 38:324; Martin 2010 J Invest Dermatol 130:529", "16:48258198"),
+       "Yoshiura 2006 Nat Genet 38:324; Martin 2010 J Invest Dermatol 130:529", "16:48258198",
+       trait="Dry earwax (ABCC11)", has="001"),
     _v("rs72921001", "OR6A2", "senses", "A", "C", "C",
        ("lowest odds of cilantro tasting soapy (A allele OR 0.81)", "intermediate odds of cilantro tasting soapy",
         "highest odds of cilantro tasting soapy; locus explains ~0.5% of variance"),
-       "Eriksson 2012 Flavour 1:22", "11:6889648"),
+       "Eriksson 2012 Flavour 1:22", "11:6889648", trait="Soapy-cilantro allele (OR6A2)", has="011"),
     _v("rs4481887", "OR2M7", "senses", "G", "A", "C",
        ("highest odds of asparagus-metabolite anosmia",
         "likely able to smell asparagus metabolites (dominant OR 0.48 for anosmia)",
         "most likely able to smell asparagus metabolites"),
-       "Eriksson 2010 PLoS Genet 6:e1000993", "1:248496863"),
+       "Eriksson 2010 PLoS Genet 6:e1000993", "1:248496863",
+       trait="Can smell asparagus metabolites (OR2M7)", has="011"),
     _v("rs10427255", "ZEB2", "senses", "T", "C", "C",
        ("baseline odds of photic sneeze reflex", "higher odds of photic sneeze reflex (OR 1.32 per C)",
         "highest odds of photic sneeze reflex"),
-       "Eriksson 2010 PLoS Genet 6:e1000993", "2:146125523"),
+       "Eriksson 2010 PLoS Genet 6:e1000993", "2:146125523", trait="Photic sneeze reflex allele (ZEB2)", has="011"),
     _v("rs1815739", "ACTN3", "senses", "C", "T", "B",
        ("RR: alpha-actinin-3 present in fast fibres; enriched in sprint/power athletes", "RX: alpha-actinin-3 present",
         "XX: alpha-actinin-3 deficient (~18% of Europeans); under-represented in elite sprinters"),
-       "Yang 2003 Am J Hum Genet 73:627", "11:66328095"),
+       "Yang 2003 Am J Hum Genet 73:627", "11:66328095", trait="Alpha-actinin-3 deficiency (ACTN3 XX)", has="001"),
     _v("rs713598", "TAS2R38", "senses", "C", "G", "B", ("Ala49 (AVI)", "Ala49/Pro49", "Pro49 (PAV)"),
-       "Kim 2003 Science 299:1221", "7:141673345", hidden=True),
+       "Kim 2003 Science 299:1221", "7:141673345", hidden=True, trait="TAS2R38 Pro49", has="011"),
     _v("rs1726866", "TAS2R38", "senses", "A", "G", "B", ("Val262 (AVI)", "Val262/Ala262", "Ala262 (PAV)"),
-       "Kim 2003 Science 299:1221", "7:141672705", hidden=True),
+       "Kim 2003 Science 299:1221", "7:141672705", hidden=True, trait="TAS2R38 Ala262", has="011"),
     _v("rs10246939", "TAS2R38", "senses", "T", "C", "B", ("Ile296 (AVI)", "Ile296/Val296", "Val296 (PAV)"),
-       "Kim 2003 Science 299:1221", "7:141672604", hidden=True),
+       "Kim 2003 Science 299:1221", "7:141672604", hidden=True, trait="TAS2R38 Val296", has="011"),
 
     _v("rs4988235", "MCM6/LCT", "diet", "G", "A", "B",
        ("lactase non-persistence likely (adult lactose malabsorption)", "lactase persistence (dominant)",
         "lactase persistence"),
        "Enattah 2002 Nat Genet 30:233; Tishkoff 2007 Nat Genet 39:31 (non-European persistence alleles not assessed)",
-       "2:136608646", levels="100"),
+       "2:136608646", levels="100", trait="Lactase persistence (MCM6/LCT)", has="011"),
     _v("rs762551", "CYP1A2", "diet", "C", "A", "C",
        ("slower caffeine metabolism (*1F absent)", "slower caffeine metabolism",
         "rapid caffeine metabolism (*1F/*1F, highly inducible)"),
-       "Sachse 1999 Br J Clin Pharmacol 47:445; Cornelis 2006 JAMA 295:1135", "15:75041917"),
+       "Sachse 1999 Br J Clin Pharmacol 47:445; Cornelis 2006 JAMA 295:1135", "15:75041917",
+       trait="Fast caffeine metabolism (CYP1A2 *1F/*1F)", has="001"),
     _v("rs601338", "FUT2", "diet", "G", "A", "B",
        ("secretor", "secretor (non-secretor carrier)",
         "non-secretor (W154X/W154X): largely resistant to symptomatic infection by common norovirus strains"),
-       "Lindesmith 2003 Nat Med 9:548; Thorven 2005 J Virol 79:15351", "19:49206674"),
+       "Lindesmith 2003 Nat Med 9:548; Thorven 2005 J Virol 79:15351", "19:49206674",
+       trait="Non-secretor (FUT2)", has="001"),
     _v("rs9939609", "FTO", "diet", "T", "A", "C",
        ("no FTO risk allele", "one obesity-risk allele", "~3 kg heavier on average; obesity OR 1.67 vs T/T"),
-       "Frayling 2007 Science 316:889", "16:53820527"),
+       "Frayling 2007 Science 316:889", "16:53820527", trait="Obesity-risk allele (FTO)", has="011"),
     _v("rs17782313", "MC4R", "diet", "T", "C", "C",
        ("no MC4R risk allele", "one BMI-raising allele", "two BMI-raising alleles"),
-       "Loos 2008 Nat Genet 40:768", "18:57851097"),
+       "Loos 2008 Nat Genet 40:768", "18:57851097", trait="BMI-raising allele (MC4R)", has="011"),
     _v("rs7903146", "TCF7L2", "diet", "C", "T", "C",
        ("no TCF7L2 risk allele", "type 2 diabetes relative risk 1.45", "type 2 diabetes relative risk 2.41"),
-       "Grant 2006 Nat Genet 38:320", "10:114758349", levels="012"),
+       "Grant 2006 Nat Genet 38:320", "10:114758349", levels="012",
+       trait="Type 2 diabetes risk allele (TCF7L2)", has="011"),
     _v("rs2282679", "GC", "diet", "T", "G", "C",
        ("no GC low-vitamin-D allele", "modestly lower serum 25(OH)D",
         "lower serum 25(OH)D, higher odds of insufficiency"),
-       "Wang 2010 Lancet 376:180", "4:72608383"),
+       "Wang 2010 Lancet 376:180", "4:72608383", trait="Lower vitamin D allele (GC)", has="011"),
     _v("rs662799", "APOA5", "diet", "A", "G", "C",
        ("no -1131C allele", "higher plasma triglycerides (-1131C)", "higher plasma triglycerides (-1131C/C)"),
-       "Pennacchio 2001 Science 294:169", "11:116663707"),
+       "Pennacchio 2001 Science 294:169", "11:116663707", trait="Higher triglyceride allele (APOA5)", has="011"),
     _v("rs1801133", "MTHFR", "diet", "G", "A", "B", ("677CC", "677CT", "677TT"),
-       "Frosst 1995 Nat Genet 10:111", "1:11856378", hidden=True),
+       "Frosst 1995 Nat Genet 10:111", "1:11856378", hidden=True, trait="MTHFR 677T", has="011"),
     _v("rs1801131", "MTHFR", "diet", "T", "G", "B", ("1298AA", "1298AC", "1298CC"),
-       "van der Put 1998 Am J Hum Genet 62:1044", "1:11854476", hidden=True),
+       "van der Put 1998 Am J Hum Genet 62:1044", "1:11854476", hidden=True, trait="MTHFR 1298C", has="011"),
 
     _v("rs671", "ALDH2", "substances", "G", "A", "B",
        ("normal ALDH2 activity", "ALDH2*1/*2: alcohol flushing; drinking raises oesophageal cancer risk",
         "ALDH2*2/*2: near-absent ALDH2 activity, severe flushing"),
-       "Brooks 2009 PLoS Med 6:e50", "12:112241766", levels="022"),
+       "Brooks 2009 PLoS Med 6:e50", "12:112241766", levels="022", trait="Alcohol flush (ALDH2*2)", has="011"),
     _v("rs1229984", "ADH1B", "substances", "C", "T", "B",
        ("ADH1B*1/*1 (typical in Europeans)", "one fast ADH1B*2 allele: lower risk of alcohol dependence",
         "ADH1B*2/*2: lower risk of alcohol dependence"),
-       "Walters 2018 Nat Neurosci 21:1656", "4:100239319"),
+       "Walters 2018 Nat Neurosci 21:1656", "4:100239319", trait="Fast alcohol metabolism (ADH1B*2)", has="011"),
     _v("rs16969968", "CHRNA5", "substances", "G", "A", "C",
        ("no D398N risk allele", "heavier smoking if a smoker; higher lung cancer risk",
         "heaviest smoking quantity if a smoker; higher lung cancer risk"),
-       "Thorgeirsson 2008 Nature 452:638; Saccone 2010 PLoS Genet 6:e1001053", "15:78882925", levels="011"),
+       "Thorgeirsson 2008 Nature 452:638; Saccone 2010 PLoS Genet 6:e1001053", "15:78882925", levels="011",
+       trait="Heavy-smoking risk allele (CHRNA5)", has="011"),
 
     _v("rs4244285", "CYP2C19", "drugs", "G", "A", "A", ("no *2", "*2 (no function)", "*2/*2"),
-       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96541616", hidden=True),
+       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96541616", hidden=True, trait="CYP2C19*2", has="011"),
     _v("rs4986893", "CYP2C19", "drugs", "G", "A", "A", ("no *3", "*3 (no function)", "*3/*3"),
-       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96540410", hidden=True),
+       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96540410", hidden=True, trait="CYP2C19*3", has="011"),
     _v("rs12248560", "CYP2C19", "drugs", "C", "T", "A", ("no *17", "*17 (increased function)", "*17/*17"),
-       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96521657", hidden=True),
+       "Lee 2022 Clin Pharmacol Ther 112:959", "10:96521657", hidden=True, trait="CYP2C19*17", has="011"),
     _v("rs1799853", "CYP2C9", "drugs", "C", "T", "A", ("no *2", "*2 (decreased function)", "*2/*2"),
-       "Johnson 2017 Clin Pharmacol Ther 102:397", "10:96702047", hidden=True),
+       "Johnson 2017 Clin Pharmacol Ther 102:397", "10:96702047", hidden=True, trait="CYP2C9*2", has="011"),
     _v("rs1057910", "CYP2C9", "drugs", "A", "C", "A", ("no *3", "*3 (no function)", "*3/*3"),
-       "Johnson 2017 Clin Pharmacol Ther 102:397", "10:96741053", hidden=True),
-    _v("rs9923231", "VKORC1", "drugs", "C", "T", "A", ("-1639GG", "-1639GA", "-1639AA"),
-       "Rieder 2005 N Engl J Med 352:2285; Johnson 2017 Clin Pharmacol Ther 102:397", "16:31107689", hidden=True),
+       "Johnson 2017 Clin Pharmacol Ther 102:397", "10:96741053", hidden=True, trait="CYP2C9*3", has="011"),
+    _v("rs9923231", "VKORC1", "drugs", "C", "T", "A",
+       ("-1639GG: usual warfarin sensitivity", "-1639GA: increased warfarin sensitivity",
+        "-1639AA: high warfarin sensitivity"),
+       "Rieder 2005 N Engl J Med 352:2285; Johnson 2017 Clin Pharmacol Ther 102:397 (CPIC)", "16:31107689",
+       levels="011", trait="Warfarin sensitivity (VKORC1 -1639A)", has="011"),
     _v("rs4149056", "SLCO1B1", "drugs", "T", "C", "A",
        ("normal SLCO1B1 function", "decreased function: myopathy OR 4.5 on simvastatin 80 mg/day",
         "poor function: myopathy OR 16.9 on simvastatin 80 mg/day"),
        "SEARCH 2008 N Engl J Med 359:789; Cooper-DeHoff 2022 Clin Pharmacol Ther 111:1007", "12:21331549",
-       levels="012"),
+       levels="012", trait="Statin myopathy risk (SLCO1B1)", has="011"),
     _v("rs776746", "CYP3A5", "drugs", "T", "C", "A",
        ("*1/*1: CYP3A5 expressor; CPIC raises the tacrolimus starting dose 1.5-2x",
         "*1/*3: CYP3A5 expressor; CPIC raises the tacrolimus starting dose 1.5-2x",
         "*3/*3: non-expressor (typical in Europeans); standard tacrolimus dosing"),
-       "Birdwell 2015 Clin Pharmacol Ther 98:19", "7:99270539", levels="110"),
+       "Birdwell 2015 Clin Pharmacol Ther 98:19", "7:99270539", levels="110",
+       trait="CYP3A5 expressor (tacrolimus dosing)", has="110"),
     _v("rs3892097", "CYP2D6", "drugs", "C", "T", "A",
        ("no *4 (gene deletions/duplications cannot be detected on chips)",
         "one *4 no-function allele: intermediate metabolizer if the other allele is normal",
         "*4/*4: poor metabolizer (codeine, tramadol, tamoxifen, many antidepressants)"),
-       "Caudle 2020 Clin Transl Sci 13:116", "22:42524947", levels="012"),
+       "Caudle 2020 Clin Transl Sci 13:116", "22:42524947", levels="012",
+       trait="CYP2D6*4 no-function allele", has="011"),
     _v("rs2395029", "HCP5", "drugs", "T", "G", "A",
        ("HLA-B*57:01 tag absent (tag validated in Europeans)",
         "HLA-B*57:01 tag present: abacavir hypersensitivity risk, confirm by HLA typing",
         "HLA-B*57:01 tag present (two copies): abacavir hypersensitivity risk, confirm by HLA typing"),
-       "Mallal 2008 N Engl J Med 358:568; Colombo 2008 J Infect Dis 198:864", "6:31431780", levels="022"),
+       "Mallal 2008 N Engl J Med 358:568; Colombo 2008 J Infect Dis 198:864", "6:31431780", levels="022",
+       trait="HLA-B*57:01 tag (abacavir hypersensitivity)", has="011"),
     _v("rs3918290", "DPYD", "drugs", "C", "T", "A", ("no *2A", "*2A (no function)", "*2A/*2A"),
-       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97915614", hidden=True, rare=True),
+       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97915614", hidden=True, rare=True, trait="DPYD*2A", has="011"),
     _v("rs55886062", "DPYD", "drugs", "A", "C", "A", ("no *13", "*13 (no function)", "*13/*13"),
-       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97981343", hidden=True, rare=True),
+       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97981343", hidden=True, rare=True, trait="DPYD*13", has="011"),
     _v("rs67376798", "DPYD", "drugs", "T", "A", "A",
        ("no c.2846A>T", "c.2846A>T (decreased function)", "c.2846A>T homozygous"),
-       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97547947", hidden=True, rare=True),
+       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97547947", hidden=True, rare=True,
+       trait="DPYD c.2846A>T", has="011"),
     _v("rs56038477", "DPYD", "drugs", "C", "T", "A", ("no HapB3", "HapB3 (decreased function)", "HapB3 homozygous"),
-       "Amstutz 2018 Clin Pharmacol Ther 103:210", hidden=True),
+       "Amstutz 2018 Clin Pharmacol Ther 103:210", hidden=True, trait="DPYD HapB3", has="011"),
     _v("rs1800462", "TPMT", "drugs", "C", "G", "A", ("no *2", "*2 (no function)", "*2/*2"),
-       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18143955", hidden=True, rare=True),
+       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18143955", hidden=True, rare=True, trait="TPMT*2", has="011"),
     _v("rs1800460", "TPMT", "drugs", "C", "T", "A", ("no 460A", "460A (*3B, or *3A with 719G)", "460A homozygous"),
-       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18139228", hidden=True),
+       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18139228", hidden=True,
+       trait="TPMT 460A (*3B or *3A)", has="011"),
     _v("rs1142345", "TPMT", "drugs", "T", "C", "A", ("no 719G", "719G (*3C, or *3A with 460A)", "719G homozygous"),
-       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18130918", hidden=True),
-    _v("rs116855232", "NUDT15", "drugs", "C", "T", "A", ("no *3", "*3 (no function)", "*3/*3"),
-       "Relling 2019 Clin Pharmacol Ther 105:1095", hidden=True),
+       "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18130918", hidden=True,
+       trait="TPMT 719G (*3C or *3A)", has="011"),
+    _v("rs116855232", "NUDT15", "drugs", "C", "T", "A",
+       ("no NUDT15*3: normal thiopurine tolerance at this site",
+        "NUDT15*3 carrier: intermediate metabolizer; reduced thiopurine starting dose",
+        "NUDT15*3/*3: poor metabolizer; thiopurines need drastic dose reduction"),
+       "Relling 2019 Clin Pharmacol Ther 105:1095 (CPIC)", levels="022",
+       trait="Reduced NUDT15 activity (thiopurines)", has="011"),
 
     _v("rs429358", "APOE", "health", "T", "C", "A", ("112Cys/Cys", "112Cys/Arg", "112Arg/Arg"),
-       "Corder 1993 Science 261:921", "19:45411941", hidden=True),
+       "Corder 1993 Science 261:921", "19:45411941", hidden=True,
+       trait="APOE e4-defining allele (rs429358 C)", has="011"),
     _v("rs7412", "APOE", "health", "C", "T", "A", ("158Arg/Arg", "158Arg/Cys", "158Cys/Cys"),
-       "Corder 1993 Science 261:921", "19:45412079", hidden=True),
+       "Corder 1993 Science 261:921", "19:45412079", hidden=True,
+       trait="APOE e2-defining allele (rs7412 T)", has="011"),
     _v("rs6025", "F5", "health", "C", "T", "A",
        ("no factor V Leiden", "factor V Leiden heterozygote: venous thrombosis risk ~7-fold",
         "factor V Leiden homozygote: venous thrombosis risk ~80-fold"),
-       "Bertina 1994 Nature 369:64; Rosendaal 1995 Blood 85:1504", "1:169519049", levels="022"),
+       "Bertina 1994 Nature 369:64; Rosendaal 1995 Blood 85:1504", "1:169519049", levels="022",
+       trait="Factor V Leiden (F5)", has="011"),
     _v("rs1799963", "F2", "health", "G", "A", "A",
        ("no prothrombin G20210A", "G20210A heterozygote: venous thrombosis risk 2.8-fold",
         "G20210A homozygote: strongly increased venous thrombosis risk"),
-       "Poort 1996 Blood 88:3698", "11:46761055", levels="022", aliases=("i3002432",)),
+       "Poort 1996 Blood 88:3698", "11:46761055", levels="022", aliases=("i3002432",),
+       trait="Prothrombin G20210A (F2)", has="011"),
     _v("rs1800562", "HFE", "health", "G", "A", "A", ("no C282Y", "C282Y", "C282Y/C282Y"),
-       "Feder 1996 Nat Genet 13:399", "6:26093141", hidden=True),
+       "Feder 1996 Nat Genet 13:399", "6:26093141", hidden=True, trait="HFE C282Y", has="011"),
     _v("rs1799945", "HFE", "health", "C", "G", "A", ("no H63D", "H63D", "H63D/H63D"),
-       "Feder 1996 Nat Genet 13:399", "6:26091179", hidden=True),
+       "Feder 1996 Nat Genet 13:399", "6:26091179", hidden=True, trait="HFE H63D", has="011"),
     _v("rs333", "CCR5", "health", "I", "D", "B",
        ("no CCR5-delta32", "CCR5-delta32 carrier; slower HIV-1 progression reported",
         "no functional CCR5: strong resistance to CCR5-tropic (not CXCR4-tropic) HIV-1"),
        "Samson 1996 Nature 382:722; Liu 1996 Cell 86:367; Dean 1996 Science 273:1856", "3:46414947",
-       aliases=("i3003626",)),
+       aliases=("i3003626",), trait="CCR5-delta32", has="011"),
     _v("rs63750847", "APP", "health", "C", "T", "B",
        ("no APP A673T", "A673T: protective against Alzheimer's disease and cognitive decline",
         "A673T homozygous: protective"),
-       "Jonsson 2012 Nature 488:96", "21:27269932", rare=True),
+       "Jonsson 2012 Nature 488:96", "21:27269932", rare=True, trait="APP A673T (Alzheimer's-protective)", has="011"),
     _v("rs2187668", "HLA-DQA1", "health", "C", "T", "B", ("no DQ2.5 tag", "DQ2.5 tag", "DQ2.5 tag x2"),
-       "Monsuur 2008 PLoS One 3:e2270", "6:32605884", hidden=True),
+       "Monsuur 2008 PLoS One 3:e2270", "6:32605884", hidden=True, trait="HLA-DQ2.5 tag", has="011"),
     _v("rs7454108", "HLA-DQB1", "health", "T", "C", "B", ("no DQ8 tag", "DQ8 tag", "DQ8 tag x2"),
-       "Monsuur 2008 PLoS One 3:e2270", "6:32681483", hidden=True),
+       "Monsuur 2008 PLoS One 3:e2270", "6:32681483", hidden=True, trait="HLA-DQ8 tag", has="011"),
     _v("rs3184504", "SH2B3", "health", "C", "T", "C",
        ("no R262W risk allele", "autoimmune risk allele (celiac disease, type 1 diabetes)",
         "two autoimmune risk alleles"),
-       "Hunt 2008 Nat Genet 40:395", "12:111884608"),
+       "Hunt 2008 Nat Genet 40:395", "12:111884608", trait="Autoimmune risk allele (SH2B3 R262W)", has="011"),
 
     _v("rs4680", "COMT", "neuro", "G", "A", "D",
        ("Val/Val: higher COMT activity", "Val/Met: intermediate COMT activity",
         "Met/Met: lower COMT activity; behavioural associations inconsistent"),
-       "Lachman 1996 Pharmacogenetics 6:243; Chen 2004 Am J Hum Genet 75:807", "22:19951271"),
+       "Lachman 1996 Pharmacogenetics 6:243; Chen 2004 Am J Hum Genet 75:807", "22:19951271",
+       trait="Lower COMT activity (Met allele)", has="011"),
     _v("rs6265", "BDNF", "neuro", "C", "T", "D",
        ("Val/Val", "Val/Met: reduced activity-dependent BDNF secretion; no depression association in large samples",
         "Met/Met: reduced activity-dependent BDNF secretion; no depression association in large samples"),
-       "Egan 2003 Cell 112:257; Border 2019 Am J Psychiatry 176:376", "11:27679916"),
+       "Egan 2003 Cell 112:257; Border 2019 Am J Psychiatry 176:376", "11:27679916",
+       trait="BDNF Met allele", has="011"),
     _v("rs1006737", "CACNA1C", "neuro", "G", "A", "C",
        ("no CACNA1C risk allele", "bipolar disorder OR 1.18 per allele (negligible absolute effect)",
         "bipolar disorder OR 1.18 per allele, two copies (negligible absolute effect)"),
-       "Ferreira 2008 Nat Genet 40:1056", "12:2345295"),
+       "Ferreira 2008 Nat Genet 40:1056", "12:2345295", trait="Bipolar-associated allele (CACNA1C)", has="011"),
     _v("rs10994336", "ANK3", "neuro", "C", "T", "C",
        ("no ANK3 risk allele", "bipolar disorder OR 1.45 per allele (small absolute effect)",
         "bipolar disorder OR 1.45 per allele, two copies (small absolute effect)"),
-       "Ferreira 2008 Nat Genet 40:1056", "10:62179812"),
+       "Ferreira 2008 Nat Genet 40:1056", "10:62179812", trait="Bipolar-associated allele (ANK3)", has="011"),
 
     _v("rs2802292", "FOXO3", "longevity", "T", "G", "C",
        ("no FOXO3 longevity-associated allele", "one longevity-associated allele", "two longevity-associated alleles"),
-       "Willcox 2008 Proc Natl Acad Sci USA 105:13987; Flachsbart 2009 Proc Natl Acad Sci USA 106:2700", "6:108908518"),
+       "Willcox 2008 Proc Natl Acad Sci USA 105:13987; Flachsbart 2009 Proc Natl Acad Sci USA 106:2700", "6:108908518",
+       trait="Longevity-associated allele (FOXO3)", has="011"),
 ]
 
 DB_BY_ID = {v.rsid: v for v in DB}
@@ -662,7 +697,7 @@ class Call:
     @property
     def genotype(self) -> str:
         if self.status == "ok":
-            return "/".join(sorted(self.alleles, key=lambda a: (a != self.v.ref, a)))
+            return "/".join(self.alleles)
         return {"nocall": "--", "absent": "n/a"}.get(self.status, self.raw or "?")
 
 
@@ -713,6 +748,9 @@ class CallSet(dict):
 class Finding:
     cat: str
     name: str
+    title: str
+    has: bool | None
+    basis: str
     text: str
     ev: str
     src: str
@@ -720,8 +758,19 @@ class Finding:
     data: dict = field(default_factory=dict)
 
 
-def _na(cat, name, ev, src, rsids):
-    return Finding(cat, name, "not assessable: " + ", ".join(rsids) + " absent or no-call", ev, src, -1)
+def _basis(cs, rsids):
+    def one(r):
+        c = cs[r]
+        if c.status == "ok":
+            return f"{r} {c.genotype}"
+        return f"{r} " + {"nocall": "(no-call)", "absent": "(not in your file)"}.get(c.status, f"({c.raw!r} conflict)")
+    found = all(cs[r].status == "ok" for r in rsids)
+    return ", ".join(one(r) for r in rsids) + (" in your file" if found else "")
+
+
+def _na(cat, name, title, basis, ev, src, rsids):
+    return Finding(cat, name, title, None, basis, "not assessable: " + ", ".join(rsids) + " absent or no-call",
+                   ev, src, -1)
 
 
 def _untested(miss):
@@ -742,21 +791,26 @@ APOE_TEXT = {
 
 
 def f_apoe(cs):
+    ids = ("rs429358", "rs7412")
+    title, basis = "APOE e4 (Alzheimer's risk allele)", _basis(cs, ids)
     a, b = cs.n("rs429358"), cs.n("rs7412")
     if a is None or b is None:
-        return [_na("health", "APOE", "A", APOE_SRC, cs.missing(("rs429358", "rs7412")))]
+        return [_na("health", "APOE", title, basis, "A", APOE_SRC, cs.missing(ids))]
     geno = APOE_TABLE[(a, b)]
     text, level = APOE_TEXT.get(geno, ("implies the rare e1 haplotype; a genotyping error is more likely, verify", 1))
-    out = [Finding("health", "APOE", f"{geno}: {text} (Farrer 1997, Caucasian clinical series)", "A", APOE_SRC,
-                   level, {"genotype": geno})]
+    has = None if geno in ("e1/e2", "e1/e1") else "e4" in geno
+    out = [Finding("health", "APOE", title, has, basis, f"{geno}: {text} (Farrer 1997, Caucasian clinical series)",
+                   "A", APOE_SRC, level, {"genotype": geno})]
     if "e1" not in geno:
         if "e4" in geno:
-            lt = "e4 carrier: e4 is under-represented among long-lived individuals"
+            lt = f"{geno}: e4 is under-represented among long-lived individuals"
         elif "e2" in geno:
-            lt = "e2 carrier without e4: e2 is over-represented among long-lived individuals"
+            lt = f"{geno}: e2 is over-represented among long-lived individuals"
         else:
             lt = "e3/e3: neutral at the strongest longevity locus"
-        out.append(Finding("longevity", "APOE", lt, "B", "Deelen 2019 Nat Commun 10:3669", 0, {"genotype": geno}))
+        out.append(Finding("longevity", "APOE longevity", "Longevity-favouring APOE (e2, no e4)",
+                           "e2" in geno and "e4" not in geno, basis, lt, "B", "Deelen 2019 Nat Commun 10:3669", 0,
+                           {"genotype": geno}))
     return out
 
 
@@ -770,6 +824,8 @@ IRISPLEX = (
 )
 IRISPLEX_ALPHA = (2.575575265, 0.306416526)
 IRISPLEX_SRC = "Walsh 2011 Forensic Sci Int Genet 5:170; Liu 2009 Curr Biol 19:R192 (HIrisPlex-S webtool parameters)"
+EYE_TITLES = {"blue": "Blue eyes (IrisPlex)", "intermediate": "Green/hazel eyes (IrisPlex)",
+              "brown": "Brown eyes (IrisPlex)"}
 
 
 def irisplex(counts: dict) -> dict:
@@ -783,13 +839,17 @@ def irisplex(counts: dict) -> dict:
 def f_irisplex(cs):
     counts = {r: cs.n(r, a) for r, a, _, _ in IRISPLEX}
     miss = [r for r, k in counts.items() if k is None]
+    basis = f"IrisPlex model, {len(IRISPLEX) - len(miss)} of {len(IRISPLEX)} SNPs in your file"
     if miss:
-        return [_na("appearance", "IrisPlex eye colour", "B", IRISPLEX_SRC, miss)]
+        return [_na("appearance", "IrisPlex", "Eye colour (IrisPlex)", basis, "B", IRISPLEX_SRC, miss)]
     p = irisplex(counts)
     best = max(p, key=p.get)
-    call = best if p[best] >= 0.7 else f"inconclusive below 0.7 (highest: {best})"
-    text = f"blue {p['blue']:.3f}, intermediate {p['intermediate']:.3f}, brown {p['brown']:.3f} -> {call}"
-    return [Finding("appearance", "IrisPlex eye colour", text, "B", IRISPLEX_SRC, 0, {"p": p, "counts": counts})]
+    called = p[best] >= 0.7
+    text = f"blue {p['blue']:.3f}, intermediate {p['intermediate']:.3f}, brown {p['brown']:.3f}"
+    text += f" -> {best}" if called else " -> inconclusive (no category reaches 0.7)"
+    title = EYE_TITLES[best] if called else "Eye colour (IrisPlex)"
+    return [Finding("appearance", "IrisPlex", title, True if called else None, basis, text, "B", IRISPLEX_SRC, 0,
+                    {"p": p, "counts": counts})]
 
 
 MC1R_R = (("rs1805006", "D84E"), ("rs11547464", "R142H"), ("rs1805007", "R151C"), ("rs1805008", "R160W"),
@@ -810,68 +870,80 @@ def f_mc1r(cs):
             if k:
                 carried.append(name if k == 1 else f"{name} x2")
             big, small = (big + k, small) if strong else (big, small + k)
-    if len(miss) == len(MC1R_R) + len(MC1R_r):
-        return [_na("appearance", "MC1R red hair", "B", src, [r for r, _ in MC1R_R + MC1R_r])]
+    total = len(MC1R_R) + len(MC1R_r)
+    basis = f"{total - len(miss)} of {total} MC1R coding variants in your file"
+    if len(miss) == total:
+        return [_na("appearance", "MC1R", "Red hair genotype (MC1R)", basis, "B", src,
+                    [r for r, _ in MC1R_R + MC1R_r])]
     if big >= 2:
-        text, level = "R/R: red hair likely (recessive; MC1R variants almost never share a haplotype, so two R " \
-                      "alleles are in trans); fair skin, freckling, higher melanoma risk", 1
+        title, text, level = "Red hair genotype (MC1R R/R)", "red hair likely (recessive; MC1R variants almost " \
+            "never share a haplotype, so two R alleles are in trans); fair skin, freckling, higher melanoma risk", 1
     elif big == 1 and small:
-        text, level = "R/r: red hair possible; more freckling and sun sensitivity, higher melanoma risk", 1
+        title, text, level = "MC1R R/r red-hair alleles", "red hair possible; more freckling and sun " \
+            "sensitivity, higher melanoma risk", 1
     elif big == 1:
-        text, level = "R/+ carrier: red hair unlikely; more freckling and sun sensitivity, higher melanoma risk", 0
+        title, text, level = "MC1R red-hair allele carrier (R/+)", "red hair unlikely; more freckling and sun " \
+            "sensitivity, higher melanoma risk", 0
     elif small:
-        text, level = "weak r alleles only: small pigmentation effect", 0
+        title, text, level = "MC1R weak red-hair alleles (r)", "small pigmentation effect", 0
     else:
-        text, level = "no tested MC1R variant", 0
+        title, text, level = "MC1R red-hair alleles", "no tested MC1R variant", 0
     if carried:
         text += " [" + ", ".join(carried) + "]"
-    return [Finding("appearance", "MC1R red hair", text + _untested(miss), "B", src, level,
+    return [Finding("appearance", "MC1R", title, big + small > 0, basis, text + _untested(miss), "B", src, level,
                     {"R": big, "r": small, "carried": carried})]
 
 
 def f_tas2r38(cs):
     ids = ("rs713598", "rs1726866", "rs10246939")
+    title, basis, src = "PTC/PROP bitter taster (TAS2R38)", _basis(cs, ids), "Kim 2003 Science 299:1221"
     k = [cs.n(r) for r in ids]
     if None in k:
-        return [_na("senses", "TAS2R38 bitter taste", "B", "Kim 2003 Science 299:1221", cs.missing(ids))]
+        return [_na("senses", "TAS2R38", title, basis, "B", src, cs.missing(ids))]
     if k[0] == k[1] == k[2]:
-        text = {2: "PAV/PAV: taster, strongest PTC/PROP bitterness", 1: "PAV/AVI: taster",
-                0: "AVI/AVI: non-taster of PTC/PROP"}[k[0]]
+        has = k[0] > 0
+        text = {2: "PAV/PAV: taster, strongest bitterness perception", 1: "PAV/AVI: taster",
+                0: "AVI/AVI: non-taster"}[k[0]]
     else:
-        text = "includes a rare haplotype (AAV, AVV, PVI...); taster status uncertain"
-    return [Finding("senses", "TAS2R38 bitter taste", text, "B", "Kim 2003 Science 299:1221", 0, {"pav_counts": k})]
+        has, text = None, "includes a rare haplotype (AAV, AVV, PVI...); taster status uncertain"
+    return [Finding("senses", "TAS2R38", title, has, basis, text, "B", src, 0, {"pav_counts": k})]
 
 
 def f_hfe(cs):
     src = "Feder 1996 Nat Genet 13:399; Allen 2008 N Engl J Med 358:221"
+    ids = ("rs1800562", "rs1799945")
+    basis = _basis(cs, ids)
     c, h = cs.n("rs1800562"), cs.n("rs1799945")
     if c is None:
-        return [_na("health", "HFE haemochromatosis", "A", src, ["rs1800562"])]
+        return [_na("health", "HFE", "HFE haemochromatosis variants", basis, "A", src, ["rs1800562"])]
     h0 = h or 0
     if c == 2:
-        text, level = "C282Y/C282Y: haemochromatosis genotype; iron-overload disease in 28.4% of male and 1.2% " \
-                      "of female homozygotes; ferritin and transferrin saturation are the follow-up tests", 2
+        title, text, level = "Haemochromatosis genotype (HFE C282Y/C282Y)", "iron-overload disease in 28.4% of " \
+            "male and 1.2% of female homozygotes; ferritin and transferrin saturation are the follow-up tests", 2
     elif c == 1 and h0 == 1:
-        text, level = "C282Y/H63D compound heterozygote: mild iron loading possible, overload disease uncommon", 1
+        title, text, level = "HFE compound heterozygote (C282Y/H63D)", "mild iron loading possible; overload " \
+            "disease uncommon", 1
     elif c == 1:
-        text, level = "C282Y carrier: no iron overload expected", 0
+        title, text, level = "HFE C282Y carrier", "no iron overload expected", 0
     elif h0 == 2:
-        text, level = "H63D/H63D: clinical iron overload uncommon", 0
+        title, text, level = "HFE H63D/H63D", "clinical iron overload uncommon", 0
     elif h0 == 1:
-        text, level = "H63D carrier", 0
+        title, text, level = "HFE H63D carrier", "no iron overload expected", 0
     else:
-        text, level = "no C282Y or H63D", 0
+        title, text, level = "HFE haemochromatosis variants", "no C282Y or H63D", 0
     if c + h0 > 2:
         text += "; unusual combination, verify genotyping"
-    return [Finding("health", "HFE haemochromatosis", text + ("" if h is not None else " (H63D not genotyped)"),
-                    "A", src, level, {"C282Y": c, "H63D": h})]
+    text += "" if h is not None else " (H63D not genotyped)"
+    return [Finding("health", "HFE", title, c + h0 > 0, basis, text, "A", src, level, {"C282Y": c, "H63D": h})]
 
 
 def f_mthfr(cs):
     src = "Frosst 1995 Nat Genet 10:111; van der Put 1998 Am J Hum Genet 62:1044; Hickey 2013 Genet Med 15:153"
+    ids = ("rs1801133", "rs1801131")
+    title, basis = "Reduced MTHFR activity", _basis(cs, ids)
     a, b = cs.n("rs1801133"), cs.n("rs1801131")
     if a is None and b is None:
-        return [_na("diet", "MTHFR", "B", src, ["rs1801133", "rs1801131"])]
+        return [_na("diet", "MTHFR", title, basis, "B", src, list(ids))]
     a0, b0 = a or 0, b or 0
     table = {(2, 0): "677TT: thermolabile enzyme with reduced activity; homocysteine rises mainly when folate is low",
              (1, 1): "677CT/1298AC compound heterozygote: mildly reduced activity",
@@ -880,21 +952,26 @@ def f_mthfr(cs):
     text = table.get((a0, b0), "unusual combination (677T and 1298C are rarely in cis); verify genotyping")
     text += "; ACMG advises against MTHFR testing for thrombophilia"
     miss = [n for n, k in (("C677T", a), ("A1298C", b)) if k is None]
-    return [Finding("diet", "MTHFR", text + _untested(miss), "B", src, 0, {"677T": a, "1298C": b})]
+    return [Finding("diet", "MTHFR", title, a0 >= 1 or b0 == 2, basis, text + _untested(miss), "B", src, 0,
+                    {"677T": a, "1298C": b})]
 
 
 def f_celiac(cs):
     src = "Monsuur 2008 PLoS One 3:e2270"
+    ids = ("rs2187668", "rs7454108")
+    title, basis = "Celiac-permissive HLA-DQ (DQ2.5/DQ8)", _basis(cs, ids)
     dq25, dq8 = cs.n("rs2187668"), cs.n("rs7454108")
     if dq25 is None and dq8 is None:
-        return [_na("health", "HLA-DQ celiac", "B", src, ["rs2187668", "rs7454108"])]
+        return [_na("health", "HLA-DQ", title, basis, "B", src, list(ids))]
     tags = [n for n, k in (("DQ2.5", dq25), ("DQ8", dq8)) if k]
-    if tags:
-        text = " and ".join(tags) + " tag present: permissive HLA for celiac disease; most carriers never develop it"
-    else:
-        text = "no DQ2.5/DQ8 tag: celiac disease unlikely (DQ2.2 not assessed)"
     miss = [n for n, k in (("DQ2.5", dq25), ("DQ8", dq8)) if k is None]
-    return [Finding("health", "HLA-DQ celiac", text + _untested(miss), "B", src, 0, {"DQ2.5": dq25, "DQ8": dq8})]
+    if tags:
+        has = True
+        text = " and ".join(tags) + " tag present: permissive for celiac disease; most carriers never develop it"
+    else:
+        has, text = (None if miss else False), "no DQ2.5/DQ8 tag: celiac disease unlikely (DQ2.2 not assessed)"
+    return [Finding("health", "HLA-DQ", title, has, basis, text + _untested(miss), "B", src, 0,
+                    {"DQ2.5": dq25, "DQ8": dq8})]
 
 
 def _diplotype(alleles):
@@ -906,13 +983,17 @@ def _diplotype(alleles):
 
 def f_cyp2c19(cs):
     src = "Lee 2022 Clin Pharmacol Ther 112:959 (CPIC)"
+    ids = ("rs4244285", "rs4986893", "rs12248560")
+    basis = _basis(cs, ids)
     n2, n3, n17 = cs.n("rs4244285"), cs.n("rs4986893"), cs.n("rs12248560")
     if n2 is None or n17 is None:
-        return [_na("drugs", "CYP2C19", "A", src, cs.missing(("rs4244285", "rs12248560")))]
+        return [_na("drugs", "CYP2C19", "Altered CYP2C19 function", basis, "A", src,
+                    cs.missing(("rs4244285", "rs12248560")))]
     n3 = n3 or 0
     lof, gof = n2 + n3, n17
     if lof + gof > 2:
-        return [Finding("drugs", "CYP2C19", "more than two variant alleles; cannot assign a diplotype", "A", src, 1)]
+        return [Finding("drugs", "CYP2C19", "Altered CYP2C19 function", None, basis,
+                        "more than two variant alleles; cannot assign a diplotype", "A", src, 1)]
     dip = _diplotype(["*2"] * n2 + ["*3"] * n3 + ["*17"] * n17)
     if lof == 2:
         phen, level = "poor metabolizer", 2
@@ -924,39 +1005,29 @@ def f_cyp2c19(cs):
         phen, level = "rapid metabolizer", 0
     else:
         phen, level = "normal metabolizer", 0
+    title = ("Reduced CYP2C19 function" if lof else "Increased CYP2C19 function" if gof
+             else "Altered CYP2C19 function")
     text = f"{dip}: {phen}; relevant to clopidogrel, PPIs, citalopram/escitalopram, voriconazole"
     text += _untested(["*3"] if cs.n("rs4986893") is None else [])
-    return [Finding("drugs", "CYP2C19", text, "A", src, level, {"diplotype": dip, "phenotype": phen})]
+    return [Finding("drugs", "CYP2C19", title, bool(lof or gof), basis, text, "A", src, level,
+                    {"diplotype": dip, "phenotype": phen})]
 
 
 def f_cyp2c9(cs):
-    src = "Johnson 2017 Clin Pharmacol Ther 102:397 (CPIC); Rieder 2005 N Engl J Med 352:2285"
-    n2, n3, vk = cs.n("rs1799853"), cs.n("rs1057910"), cs.n("rs9923231")
-    parts, level, data = [], 0, {}
+    src = "Johnson 2017 Clin Pharmacol Ther 102:397 (CPIC)"
+    ids = ("rs1799853", "rs1057910")
+    title, basis = "Reduced CYP2C9 function", _basis(cs, ids)
+    n2, n3 = cs.n("rs1799853"), cs.n("rs1057910")
     if n2 is None or n3 is None:
-        parts.append("CYP2C9 not assessable")
-    elif n2 + n3 > 2:
-        parts.append("CYP2C9: more than two variant alleles")
-        level = 1
-    else:
-        score = 2 - 0.5 * n2 - 1.0 * n3
-        phen = "normal" if score == 2 else "intermediate" if score >= 1 else "poor"
-        dip = _diplotype(["*2"] * n2 + ["*3"] * n3)
-        parts.append(f"CYP2C9 {dip} ({phen} metabolizer, activity score {score:g})")
-        level = max(level, {"normal": 0, "intermediate": 1, "poor": 2}[phen])
-        data.update(diplotype=dip, activity_score=score)
-    if vk is None:
-        parts.append("VKORC1 -1639 not genotyped")
-    else:
-        parts.append({0: "VKORC1 -1639GG: usual warfarin sensitivity",
-                      1: "VKORC1 -1639GA: increased warfarin sensitivity",
-                      2: "VKORC1 -1639AA: high warfarin sensitivity"}[vk])
-        level = max(level, 1 if vk else 0)
-        data["vkorc1_A"] = vk
-    if all(p.endswith(("assessable", "genotyped")) for p in parts):
-        return [_na("drugs", "CYP2C9 + VKORC1", "A", src, cs.missing(("rs1799853", "rs1057910", "rs9923231")))]
-    text = "; ".join(parts) + "; relevant to warfarin, phenytoin, several NSAIDs"
-    return [Finding("drugs", "CYP2C9 + VKORC1", text, "A", src, level, data)]
+        return [_na("drugs", "CYP2C9", title, basis, "A", src, cs.missing(ids))]
+    if n2 + n3 > 2:
+        return [Finding("drugs", "CYP2C9", title, True, basis, "more than two variant alleles; verify", "A", src, 1)]
+    score = 2 - 0.5 * n2 - 1.0 * n3
+    phen = "normal" if score == 2 else "intermediate" if score >= 1 else "poor"
+    dip = _diplotype(["*2"] * n2 + ["*3"] * n3)
+    text = f"{dip}: {phen} metabolizer (activity score {score:g}); relevant to warfarin, phenytoin, several NSAIDs"
+    return [Finding("drugs", "CYP2C9", title, score < 2, basis, text, "A", src,
+                    {"normal": 0, "intermediate": 1, "poor": 2}[phen], {"diplotype": dip, "activity_score": score})]
 
 
 DPYD = (("rs3918290", "*2A", 0.0), ("rs55886062", "*13", 0.0), ("rs67376798", "c.2846A>T", 0.5),
@@ -965,6 +1036,7 @@ DPYD = (("rs3918290", "*2A", 0.0), ("rs55886062", "*13", 0.0), ("rs67376798", "c
 
 def f_dpyd(cs):
     src = "Amstutz 2018 Clin Pharmacol Ther 103:210 (CPIC)"
+    title = "Reduced DPYD activity (fluoropyrimidine toxicity)"
     found, miss, total, score = [], [], 0, 2.0
     for rsid, name, value in DPYD:
         k = cs.n(rsid)
@@ -975,10 +1047,12 @@ def f_dpyd(cs):
             found.append(name if k == 1 else f"{name} x2")
             total += k
             score -= k * (1 - value)
+    basis = f"{len(DPYD) - len(miss)} of {len(DPYD)} CPIC DPYD variants in your file"
     if len(miss) == len(DPYD):
-        return [_na("drugs", "DPYD", "A", src, [r for r, _, _ in DPYD])]
+        return [_na("drugs", "DPYD", title, basis, "A", src, [r for r, _, _ in DPYD])]
     if total > 2:
-        return [Finding("drugs", "DPYD", "more than two variant alleles; cannot score", "A", src, 2)]
+        return [Finding("drugs", "DPYD", title, True, basis, "more than two variant alleles; cannot score", "A",
+                        src, 2)]
     if score >= 2:
         text, level = "no tested decreased/no-function variant: normal activity assumed", 0
     elif score >= 1:
@@ -988,49 +1062,35 @@ def f_dpyd(cs):
         text, level = f"activity score {score:g}: poor metabolizer; CPIC advises avoiding fluoropyrimidines", 2
     if found:
         text += " [" + ", ".join(found) + "; rare variant, confirm clinically]"
-    return [Finding("drugs", "DPYD", text + _untested(miss), "A", src, level,
+    return [Finding("drugs", "DPYD", title, score < 2, basis, text + _untested(miss), "A", src, level,
                     {"activity_score": score, "variants": found})]
 
 
-def f_thiopurine(cs):
+def f_tpmt(cs):
     src = "Relling 2019 Clin Pharmacol Ther 105:1095 (CPIC)"
-    t2, t3b, t3c, nu = cs.n("rs1800462"), cs.n("rs1800460"), cs.n("rs1142345"), cs.n("rs116855232")
-    parts, level, data = [], 0, {}
+    ids = ("rs1800462", "rs1800460", "rs1142345")
+    title, basis = "Reduced TPMT activity (thiopurines)", _basis(cs, ids)
+    t2, t3b, t3c = cs.n("rs1800462"), cs.n("rs1800460"), cs.n("rs1142345")
     if t3b is None or t3c is None:
-        parts.append("TPMT not assessable")
+        return [_na("drugs", "TPMT", title, basis, "A", src, cs.missing(ids[1:]))]
+    a3 = min(t3b, t3c)
+    nb, nc, n2 = t3b - a3, t3c - a3, t2 or 0
+    total = n2 + a3 + nb + nc
+    dip = _diplotype(["*2"] * n2 + ["*3A"] * a3 + ["*3B"] * nb + ["*3C"] * nc)
+    if total > 2:
+        text, level = "more than two variant alleles; verify", 2
+    elif total == 0:
+        text, level = "*1/*1: normal metabolizer", 0
     else:
-        a3 = min(t3b, t3c)
-        nb, nc, n2 = t3b - a3, t3c - a3, t2 or 0
-        total = n2 + a3 + nb + nc
-        dip = _diplotype(["*2"] * n2 + ["*3A"] * a3 + ["*3B"] * nb + ["*3C"] * nc)
-        if total > 2:
-            parts.append("TPMT: more than two variant alleles")
-            level = 2
-        elif total == 0:
-            parts.append("TPMT *1/*1: normal metabolizer")
-        else:
-            phen = "intermediate" if total == 1 else "poor"
-            note = "; *3B/*3C in trans (poor) is rare but not excluded" if (a3 == 1 and total == 1) else ""
-            parts.append(f"TPMT {dip}: {phen} metabolizer{note}")
-            level = 2
-        data["tpmt"] = dip
-        if t2 is None:
-            parts[-1] += " (*2 not genotyped)"
-    if nu is None:
-        parts.append("NUDT15 not genotyped")
-    else:
-        parts.append({0: "NUDT15 normal", 1: "NUDT15 *3 carrier: intermediate metabolizer",
-                      2: "NUDT15 *3/*3: poor metabolizer"}[nu])
-        level = max(level, 2 if nu else 0)
-        data["nudt15_T"] = nu
-    if all(p.endswith(("assessable", "genotyped")) for p in parts):
-        return [_na("drugs", "TPMT + NUDT15", "A", src, cs.missing(("rs1800460", "rs1142345", "rs116855232")))]
-    text = "; ".join(parts) + "; relevant to azathioprine, mercaptopurine, thioguanine"
-    return [Finding("drugs", "TPMT + NUDT15", text, "A", src, level, data)]
+        phen = "intermediate" if total == 1 else "poor"
+        note = "; *3B/*3C in trans (poor) is rare but not excluded" if (a3 == 1 and total == 1) else ""
+        text, level = f"{dip}: {phen} metabolizer{note}", 2
+    text += "; relevant to azathioprine, mercaptopurine, thioguanine"
+    text += "" if t2 is not None else " (*2 not genotyped)"
+    return [Finding("drugs", "TPMT", title, total > 0, basis, text, "A", src, level, {"tpmt": dip})]
 
 
-FINDERS = (f_irisplex, f_mc1r, f_tas2r38, f_mthfr, f_cyp2c19, f_cyp2c9, f_dpyd, f_thiopurine,
-           f_apoe, f_hfe, f_celiac)
+FINDERS = (f_irisplex, f_mc1r, f_tas2r38, f_mthfr, f_cyp2c19, f_cyp2c9, f_dpyd, f_tpmt, f_apoe, f_hfe, f_celiac)
 
 
 def resolve_strand(genome: Genome, cs: CallSet):
@@ -1216,8 +1276,6 @@ class PGS:
 
 EV_ORDER = "ABCD"
 LEVEL_STYLE = {-1: "2", 0: "", 1: "33", 2: "31;1"}
-DISCLAIMER = ("Research use only. Chip calls of rare variants are often false positives (Weedon 2021 BMJ "
-              "372:n214); confirm anything medically relevant with a clinical test before acting on it.")
 
 
 class Style:
@@ -1232,80 +1290,211 @@ def _ev_ok(ev: str, minimum: str) -> bool:
     return EV_ORDER.index(ev) <= EV_ORDER.index(minimum)
 
 
+EV_WORDS = {"A": "clinical grade", "B": "strong", "C": "small effect", "D": "weak"}
+
+
 def call_text(c: Call):
-    v = c.v
+    """Return (interpretation, level, technical notes) for one variant call."""
+    v, notes = c.v, []
     if c.status == "ok":
         d = c.dosage
         text, level = v.text[d], int(v.levels[d])
-        if len(c.alleles) == 1:
-            text += " (hemizygous)"
         if c.flipped:
-            text += " [strand-flipped]"
+            notes.append("strand-flipped")
         if c.unverified:
-            text += " [A/T or C/G SNP in a mixed-strand file: orientation unverifiable]"
+            notes.append("A/T or C/G SNP in a mixed-strand file, orientation unverifiable")
             level = max(level, 1)
         if c.via == "position":
-            text += " [matched by GRCh37 position]"
+            notes.append("matched by GRCh37 position")
         elif c.via not in ("", "rsid"):
-            text += f" [reported as {c.via}]"
+            notes.append(f"reported as {c.via}")
         if v.rare and d:
-            text += " [rare variant: confirm clinically]"
+            text += "; rare variant, confirm clinically"
             level = max(level, 1)
-        return text, level
+        return text, level, notes
     if c.status == "conflict":
-        return f"genotype {c.raw!r} fits neither strand of {v.ref}/{v.alt}; check file build/format", 1
-    return ("no call", -1) if c.status == "nocall" else ("not on this chip", -1)
+        return f"genotype {c.raw!r} fits neither strand of {v.ref}/{v.alt}; check file build/format", 1, notes
+    return ("no call" if c.status == "nocall" else "not on this chip"), -1, notes
+
+
+def trait_allele(v: Variant) -> str:
+    return v.ref if v.has == "110" else v.alt
+
+
+def copies(c: Call) -> str:
+    """What the file holds for this SNP and how many copies of the trait allele that is."""
+    v = c.v
+    if c.status == "absent":
+        return f"{v.rsid} not in your file"
+    if c.status == "nocall":
+        return f"{v.rsid} in your file as a no-call ({c.raw or '--'})"
+    if c.status == "conflict":
+        return f"{v.rsid} {c.raw!r} in your file; alleles do not match {v.ref}/{v.alt}"
+    allele = trait_allele(v)
+    k = c.alleles.count(allele)
+    note = f"{k} {'copy' if k == 1 else 'copies'} of trait allele {allele}"
+    if len(c.alleles) == 1:
+        note += " (hemizygous)"
+    if v.has == "001":
+        note += ", 2 needed"
+    return f"{v.rsid} {c.genotype} in your file; {note}"
+
+
+def sentence(text: str) -> str:
+    if re.match(r"[a-z]{2,}\b", text):
+        text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "?", "!")) else text + "."
 
 
 def _wrap(text: str, width: int, indent: int):
     return textwrap.wrap(text, max(width - indent, 30)) or [""]
 
 
+def _luminance(rgb) -> float:
+    def lin(c):
+        c /= 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(x) for x in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+class Palette:
+    """Gives every result title a colour no other title in the report uses. Hues step by the golden ratio so
+    neighbouring titles contrast; relative luminance is held between 0.18 and 0.55 so titles stay readable on
+    dark and light backgrounds. 24-bit when the terminal advertises it, else the xterm 256-colour cube."""
+
+    GOLDEN = 0.6180339887498949
+    LEVELS = (0, 95, 135, 175, 215, 255)
+
+    def __init__(self, truecolor: bool):
+        self.truecolor, self.used, self.n = truecolor, set(), 0
+        cube = [(r, g, b) for r in range(6) for g in range(6) for b in range(6)
+                if max(r, g, b) - min(r, g, b) >= 2
+                and 0.18 <= _luminance((self.LEVELS[r], self.LEVELS[g], self.LEVELS[b])) <= 0.55]
+        self.cube = sorted(cube, key=lambda c: colorsys.rgb_to_hls(*(x / 5 for x in c))[0])
+
+    @staticmethod
+    def _hls(hue: float, light: float):
+        return tuple(round(x * 255) for x in colorsys.hls_to_rgb(hue, light, 0.75))
+
+    def _rgb(self, hue: float, target: float):
+        lo, hi = 0.0, 1.0
+        for _ in range(30):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if _luminance(self._hls(hue, mid)) < target else (lo, mid)
+        return self._hls(hue, (lo + hi) / 2)
+
+    def take(self) -> str:
+        while True:
+            self.n += 1
+            hue = (self.n * self.GOLDEN) % 1.0
+            if not self.truecolor and len(self.used) < len(self.cube):
+                start = int(hue * len(self.cube))
+                c = next(self.cube[(start + j) % len(self.cube)] for j in range(len(self.cube))
+                         if self.cube[(start + j) % len(self.cube)] not in self.used)
+                self.used.add(c)
+                return f"38;5;{16 + 36 * c[0] + 6 * c[1] + c[2]}"
+            rgb = self._rgb(hue, (0.26, 0.34, 0.42)[self.n % 3])
+            if rgb not in self.used:
+                self.used.add(rgb)
+                return "38;2;{};{};{}".format(*rgb)
+
+
+def truecolor_supported() -> bool:
+    return os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") or "WT_SESSION" in os.environ
+
+
+@dataclass
+class Entry:
+    title: str
+    has: bool | None
+    cat: str
+    text: str
+    level: int
+    meta: str
+    src: str
+    in_file: bool
+
+
+def entries(cs, findings, category=None, min_evidence="D", show_all=False):
+    out = []
+    for cat in CATEGORIES:
+        if category and cat not in category:
+            continue
+        for f in findings:
+            if f.cat == cat and _ev_ok(f.ev, min_evidence):
+                meta = f"{f.basis}; evidence {f.ev} ({EV_WORDS[f.ev]})"
+                out.append(Entry(f.title, f.has, cat, f.text, f.level, meta, f.src, f.level >= 0))
+        for c in cs.values():
+            v = c.v
+            if v.cat != cat or not _ev_ok(v.ev, min_evidence) or (v.hidden and not show_all and c.status != "conflict"):
+                continue
+            text, level, notes = call_text(c)
+            meta = "; ".join([copies(c), f"evidence {v.ev} ({EV_WORDS[v.ev]})"] + notes)
+            has = v.has[c.dosage] == "1" if c.status == "ok" else None
+            out.append(Entry(v.trait, has, cat, text, level, meta, v.src, c.status in ("ok", "conflict")))
+    return out
+
+
+SECTIONS = (("TRAITS PRESENT", lambda e: e.in_file and e.has is True),
+            ("FOUND IN YOUR FILE, TRAIT NOT PRESENT", lambda e: e.in_file and e.has is False),
+            ("FOUND IN YOUR FILE, INCONCLUSIVE", lambda e: e.in_file and e.has is None),
+            ("NOT IN YOUR FILE OR NO-CALL", lambda e: not e.in_file))
+
+
 def render_text(genome, cs, findings, pgs_results, args, out):
     st = Style(args.color)
-    width = shutil.get_terminal_size((110, 24)).columns if args.color else 110
+    palette = Palette(getattr(args, "truecolor", False))
+    width = min(shutil.get_terminal_size((100, 24)).columns, 100) if args.color else 100
     calls = list(cs.values())
     n = {s: sum(c.status == s for c in calls) for s in ("ok", "nocall", "absent", "conflict")}
     flips = sum(c.flipped for c in calls)
     build = {"36": "NCBI36", "37": "GRCh37", "38": "GRCh38"}.get(genome.build, "build unknown")
-    w = out.write
-    w(st("1", f"genetic-trait-detector {__version__}") + "\n")
-    w(f"file      {genome.path}\n")
-    w(f"format    {genome.fmt} | {build}" + (f" ({genome.build_note})" if genome.build_note else "") +
-      f" | sex {genome.sex}\n")
+    items = entries(cs, findings, args.category, args.min_evidence, args.all)
+    groups = [(label, [e for e in items if test(e)]) for label, test in SECTIONS]
+    shown = groups if args.all else [groups[0], groups[2]]
     rate = genome.nocalls / genome.markers if genome.markers else 0.0
-    w(f"markers   {genome.markers:,} ({genome.nocalls:,} no-calls, {rate:.1%})\n")
-    w(f"database  {len(calls)} variants: {n['ok']} called, {n['nocall']} no-call, {n['absent']} not on chip, "
-      f"{flips} strand-flipped, {n['conflict']} conflicts\n")
+    sex = genome.sex.split(" (")[0]
+    w = out.write
+    w(st("1", f"genetic-trait-detector") + "\n")
+    w(f"file      {genome.path}\n")
+    w(f"data      {genome.fmt}, {build}, {'sex unknown' if sex == 'unknown' else sex}, {genome.markers:,} markers "
+      f"({rate:.1%} no-call)\n")
+    w(f"coverage  {n['ok']} of {len(calls)} database SNPs found in your file, {flips} strand-flipped, "
+      f"{n['conflict']} conflicts\n")
+    present, absent, unclear, missing = (g for _, g in groups)
+    summary = f"{len(present)} trait present" + (f", {len(unclear)} inconclusive" if unclear else "")
+    rest = f"{len(absent)} not present, {len(missing)} not in your file"
+    w(f"results   {summary}; {rest}" + ("" if args.all else " (-a lists them)") + "\n")
     if genome.strand == "minus":
         w(st("33", "warning   file reports the minus strand; all calls, including A/T and C/G SNPs, were "
                    "complemented") + "\n")
     elif genome.strand == "mixed":
         w(st("33", "warning   file mixes strands; A/T and C/G SNPs cannot be oriented and are flagged") + "\n")
+    if "only" in genome.build_note or "but" in genome.build_note:
+        w(st("33", f"warning   build check: {genome.build_note}") + "\n")
     if genome.build != "37":
         w(f"note      {build}: rsID matching only, no position fallback\n")
-    indent = 34
-    for cat, (label, color) in CATEGORIES.items():
-        if args.category and cat not in args.category:
+    for label, group in shown:
+        if not group:
             continue
-        rows = [c for c in calls if c.v.cat == cat and _ev_ok(c.v.ev, args.min_evidence) and
-                (c.status == "conflict" or (args.all or (not c.v.hidden and c.status == "ok")))]
-        fnds = [f for f in findings if f.cat == cat and _ev_ok(f.ev, args.min_evidence)]
-        if not rows and not fnds:
-            continue
-        w("\n" + st(color + ";1", label) + "\n")
-        entries = [(f"  {c.v.rsid:<11} {c.v.gene:<9} {c.genotype:<5}", c.v.ev, *call_text(c), c.v.src) for c in rows]
-        entries += [("  " + st("1", f"{f.name:<27}"), f.ev, f.text, f.level, f.src) for f in fnds]
-        for head, ev, text, level, src in entries:
-            body = _wrap(text, width, indent)
-            w(f"{head} [{ev}] " + st(LEVEL_STYLE[level], body[0]) + "\n")
-            for extra in body[1:]:
-                w(" " * indent + st(LEVEL_STYLE[level], extra) + "\n")
-            if not args.no_sources:
-                for extra in _wrap(src, width, indent):
-                    w(" " * indent + st("2", extra) + "\n")
+        w("\n" + st("1", f"{label} ({len(group)})") + "\n")
+        for cat, (cat_label, _) in CATEGORIES.items():
+            block = [e for e in group if e.cat == cat]
+            if not block:
+                continue
+            w("\n" + st("1", cat_label) + "\n")
+            for e in block:
+                w("\n  " + st("1;" + palette.take(), e.title) + "\n")
+                for line in _wrap(sentence(e.text), width, 4):
+                    w("    " + st(LEVEL_STYLE[e.level], line) + "\n")
+                for line in _wrap(e.meta, width, 4):
+                    w("    " + st("2", line) + "\n")
+                if not args.no_sources:
+                    for line in _wrap(e.src, width, 4):
+                        w("    " + st("2", line) + "\n")
     for r in pgs_results:
-        w("\n" + st("1", f"Polygenic score {r['id']}") + (f" ({r['name']}; {r['trait']})" if r["trait"] else "") + "\n")
+        w("\n" + st("1", f"POLYGENIC SCORE {r['id']}") + (f" ({r['name']}; {r['trait']})" if r["trait"] else "") + "\n")
         w(f"  {r['variants']:,} variants: {r['matched']:,} matched, {r['missing']:,} missing, {r['flipped']:,} "
           f"strand-flipped, {r['conflicts']:,} conflicts, {r['skipped']:,} skipped (non-SNV or unusable weight)\n")
         w(f"  raw score {r['score']:.6g}\n")
@@ -1315,13 +1504,41 @@ def render_text(genome, cs, findings, pgs_results, args, out):
         else:
             w("  no percentile: scoring file lacks effect-allele frequencies for every variant\n")
     w("\nevidence  " + EVIDENCE_SHORT + "\n")
-    w(st("2", DISCLAIMER) + "\n")
+
+
+def lookup(genome, cs, rsids, args, out):
+    """Show exactly what the file holds for each requested rsID and how the database reads it."""
+    st = Style(args.color)
+    for rsid in rsids:
+        rec = genome.by_id.get(rsid)
+        out.write("\n" + st("1", rsid) + "\n")
+        if rec is None:
+            out.write("  not in your file\n")
+        else:
+            gt = "/".join(rec.alleles) if rec.alleles else "no-call"
+            out.write(f"  in your file: chromosome {rec.chrom or '?'}, position {rec.pos or '?'}, raw {rec.raw!r}, "
+                      f"parsed {gt}\n")
+        c = cs.get(rsid)
+        if c is None:
+            out.write("  not in the trait database\n")
+            continue
+        text, level, notes = call_text(c)
+        v = c.v
+        verdict = {True: "trait present", False: "trait not present"}.get(
+            v.has[c.dosage] == "1" if c.status == "ok" else None, "not determinable")
+        out.write(f"  database: {v.trait}; {v.gene} {v.ref}>{v.alt}, trait allele {trait_allele(v)}\n")
+        out.write(f"  result: {copies(c)} -> {verdict}\n")
+        out.write(f"  {sentence(text)}" + (f" [{'; '.join(notes)}]" if notes else "") + "\n")
+        out.write("  " + st("2", v.src) + "\n")
 
 
 def _variant_json(c: Call):
-    text, level = call_text(c)
+    text, level, notes = call_text(c)
     v = c.v
-    return {"rsid": v.rsid, "gene": v.gene, "category": v.cat, "ref": v.ref, "effect_allele": v.alt,
+    return {"rsid": v.rsid, "gene": v.gene, "category": v.cat, "trait": v.trait,
+            "has": (v.has[c.dosage] == "1") if c.status == "ok" else None, "trait_allele": trait_allele(v),
+            "trait_allele_copies": c.alleles.count(trait_allele(v)) if c.status == "ok" else None,
+            "notes": notes, "ref": v.ref, "effect_allele": v.alt,
             "status": c.status, "genotype": c.genotype if c.status == "ok" else None, "raw": c.raw,
             "dosage": c.dosage, "flipped": c.flipped, "matched_by": c.via or None, "evidence": v.ev,
             "level": level, "interpretation": text, "component": v.hidden, "source": v.src,
@@ -1329,35 +1546,41 @@ def _variant_json(c: Call):
 
 
 def render_json(genome, cs, findings, pgs_results, args, out):
-    doc = {"tool": "genetic-trait-detector", "version": __version__,
+    items = entries(cs, findings)
+    doc = {"tool": "genetic-trait-detector",
            "file": {"path": genome.path, "format": genome.fmt, "build": genome.build or None,
-                    "build_note": genome.build_note, "sex": genome.sex, "markers": genome.markers,
-                    "nocalls": genome.nocalls},
+                    "build_note": genome.build_note, "sex": genome.sex, "strand": genome.strand,
+                    "markers": genome.markers, "nocalls": genome.nocalls},
+           "summary": {"present": [e.title for e in items if e.has is True],
+                       "absent": [e.title for e in items if e.has is False],
+                       "not_determinable": [e.title for e in items if e.has is None]},
            "variants": [_variant_json(c) for c in cs.values()],
-           "findings": [{"name": f.name, "category": f.cat, "result": f.text, "evidence": f.ev, "level": f.level,
-                         "source": f.src, "data": f.data} for f in findings],
-           "pgs": pgs_results, "evidence_scale": EVIDENCE, "disclaimer": DISCLAIMER}
-    doc["file"]["strand"] = genome.strand
+           "findings": [{"name": f.name, "title": f.title, "has": f.has, "category": f.cat, "basis": f.basis,
+                         "result": f.text, "evidence": f.ev, "level": f.level, "source": f.src, "data": f.data}
+                        for f in findings],
+           "pgs": pgs_results, "evidence_scale": EVIDENCE}
     json.dump(doc, out, indent=2)
     out.write("\n")
 
 
 def render_tsv(genome, cs, findings, pgs_results, args, out):
-    cols = ("kind", "category", "id", "gene", "genotype", "effect_allele", "dosage", "status", "flipped",
-            "evidence", "interpretation", "source")
+    cols = ("kind", "category", "id", "gene", "trait", "has", "genotype", "effect_allele", "dosage", "status",
+            "flipped", "evidence", "interpretation", "source")
     out.write("\t".join(cols) + "\n")
+    tri = {True: "yes", False: "no", None: ""}
     for c in cs.values():
         j = _variant_json(c)
-        row = ("variant", j["category"], j["rsid"], j["gene"], j["genotype"] or "", j["effect_allele"],
-               "" if j["dosage"] is None else j["dosage"], j["status"], int(j["flipped"]), j["evidence"],
-               j["interpretation"], j["source"])
+        row = ("variant", j["category"], j["rsid"], j["gene"], j["trait"], tri[j["has"]], j["genotype"] or "",
+               j["effect_allele"], "" if j["dosage"] is None else j["dosage"], j["status"], int(j["flipped"]),
+               j["evidence"], j["interpretation"], j["source"])
         out.write("\t".join(map(str, row)) + "\n")
     for f in findings:
-        row = ("finding", f.cat, f.name, "", "", "", "", "ok" if f.level >= 0 else "na", 0, f.ev, f.text, f.src)
+        row = ("finding", f.cat, f.name, "", f.title, tri[f.has], f.basis, "", "", "ok" if f.has is not None else "na",
+               0, f.ev, f.text, f.src)
         out.write("\t".join(map(str, row)) + "\n")
     for r in pgs_results:
-        row = ("pgs", "", r["id"], "", "", "", "", "ok", 0, "", f"score {r['score']:.6g}; "
-               f"matched {r['matched']}/{r['variants']}" + (f"; z {r['z']:+.3f}" if "z" in r else ""), r["trait"])
+        row = ("pgs", "", r["id"], "", r["trait"], "", "", "", "", "ok", 0, "", f"score {r['score']:.6g}; "
+               f"matched {r['matched']}/{r['variants']}" + (f"; z {r['z']:+.3f}" if "z" in r else ""), "")
         out.write("\t".join(map(str, row)) + "\n")
 
 
@@ -1372,16 +1595,15 @@ def list_db(args, out=sys.stdout):
         out.write(st(color + ";1", label) + "\n")
         for v in w:
             loc = f"{v.chrom}:{v.pos}" if v.pos else (v.chrom or "-")
-            out.write(f"  {v.rsid:<11} {v.gene:<9} {v.ref}>{v.alt}  [{v.ev}] {loc:<13} "
-                      f"{'component ' if v.hidden else ''}{st('2', v.src)}\n")
+            out.write(f"  {v.rsid:<11} {v.gene:<9} {v.ref}>{v.alt}  [{v.ev}] {loc:<13} {v.trait}"
+                      f"{' (component)' if v.hidden else ''}  {st('2', v.src)}\n")
     out.write("\ncompound calls: " + ", ".join(f.__name__[2:] for f in FINDERS) + "\n")
     out.write("alleles: GRCh37 plus strand, ref>effect\n")
 
 
 def build_parser():
     p = argparse.ArgumentParser(prog="genetic-trait-detector",
-                                description="Offline trait and variant report for consumer raw DNA files.",
-                                epilog=DISCLAIMER)
+                                description="Offline trait and variant report for consumer raw DNA files.")
     p.add_argument("file", nargs="?", help="raw genotype file (.txt/.csv/.tsv/.vcf, optionally .gz/.bz2/.zip)")
     p.add_argument("-f", "--format", choices=("text", "json", "tsv"), default="text")
     p.add_argument("-c", "--category", action="append", choices=list(CATEGORIES),
@@ -1389,15 +1611,17 @@ def build_parser():
     p.add_argument("-e", "--min-evidence", choices=tuple(EV_ORDER), default="D",
                    help="hide entries weaker than this evidence tier (A strongest)")
     p.add_argument("-a", "--all", action="store_true",
-                   help="also list component SNPs, no-calls and variants absent from the chip")
+                   help="also list traits not present, SNPs not in your file, and component SNPs")
+    p.add_argument("--snp", action="append", default=[], metavar="RSID",
+                   help="show exactly what the file holds for an rsID and how it is interpreted (repeatable)")
     p.add_argument("--pgs", action="append", default=[], metavar="FILE",
                    help="apply a PGS Catalog scoring file (repeatable)")
     p.add_argument("--build", choices=("36", "37", "38"), help="override the detected genome build")
-    p.add_argument("--no-color", action="store_true")
+    p.add_argument("--no-color", action="store_true", help="disable colour (NO_COLOR is also honoured)")
     p.add_argument("--no-sources", action="store_true", help="omit literature sources in text output")
     p.add_argument("--list", action="store_true", help="print the variant database and exit")
     p.add_argument("--selftest", action="store_true", help="run built-in tests and exit")
-    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    p.add_argument("--version", action="version", version=f"%(prog)s")
     return p
 
 
@@ -1414,8 +1638,12 @@ def wanted(pgs_list):
 def run(path, args, out):
     pgs_list = [PGS(p) for p in args.pgs]
     ids, pos = wanted(pgs_list)
-    genome = finalize(load_genome(path, ids, pos), DB, args.build or "")
+    snps = [s.strip() for s in getattr(args, "snp", []) if s.strip()]
+    genome = finalize(load_genome(path, ids | set(snps), pos), DB, args.build or "")
     cs, findings = analyse(genome)
+    if snps:
+        lookup(genome, cs, snps, args, out)
+        return genome, cs, findings, []
     pgs_results = [s.score(genome) for s in pgs_list]
     {"text": render_text, "json": render_json, "tsv": render_tsv}[args.format](
         genome, cs, findings, pgs_results, args, out)
@@ -1432,6 +1660,7 @@ def main(argv=None) -> int:
         return selftest()
     args.color = (args.format == "text" and not args.no_color and not os.environ.get("NO_COLOR")
                   and sys.stdout.isatty())
+    args.truecolor = truecolor_supported()
     if args.color and os.name == "nt":
         try:
             import colorama
@@ -1619,7 +1848,7 @@ def selftest() -> int:
     check("CYP2C19 phenotype table (CPIC)", not bad, bad)
     dp = f_dpyd(fake({"rs3918290": "CT", "rs55886062": "AA", "rs67376798": "AT", "rs56038477": "CC"}))[0]
     check("DPYD activity score *2A + c.2846A>T = 0.5 (poor)", dp.data.get("activity_score") == 0.5, dp.text)
-    tp = f_thiopurine(fake({"rs1800462": "CC", "rs1800460": "TT", "rs1142345": "CC", "rs116855232": "CC"}))[0]
+    tp = f_tpmt(fake({"rs1800462": "CC", "rs1800460": "TT", "rs1142345": "CC"}))[0]
     check("TPMT *3A/*3A poor metabolizer", tp.data.get("tpmt") == "*3A/*3A" and "poor" in tp.text, tp.text)
     ta = f_tas2r38(fake({"rs713598": "GG", "rs1726866": "AG", "rs10246939": "CC"}))[0]
     check("TAS2R38 inconsistent haplotypes flagged", "rare haplotype" in ta.text, ta.text)
@@ -1655,14 +1884,14 @@ def selftest() -> int:
                 ("build 37", g.build == "37"),
                 ("sex male", g.sex.startswith("male")),
                 ("APOE e3/e4", f["APOE"].data.get("genotype") == "e3/e4"),
-                ("IrisPlex", tuple(round(f["IrisPlex eye colour"].data["p"][k], 3)
+                ("IrisPlex", tuple(round(f["IrisPlex"].data["p"][k], 3)
                                    for k in ("blue", "intermediate", "brown")) == (0.119, 0.213, 0.668)),
-                ("MC1R R=2", f["MC1R red hair"].data.get("R") == 2),
-                ("TAS2R38 PAV/AVI", f["TAS2R38 bitter taste"].text.startswith("PAV/AVI")),
+                ("MC1R R=2", f["MC1R"].data.get("R") == 2),
+                ("TAS2R38 PAV/AVI", f["TAS2R38"].text.startswith("PAV/AVI")),
                 ("CYP2C19 *2/*17", f["CYP2C19"].data.get("diplotype") == "*2/*17"),
-                ("TPMT *1/*3A", f["TPMT + NUDT15"].data.get("tpmt") == "*1/*3A"),
+                ("TPMT *1/*3A", f["TPMT"].data.get("tpmt") == "*1/*3A"),
                 ("DPYD AS 1", f["DPYD"].data.get("activity_score") == 1.0),
-                ("HFE C282Y/C282Y", f["HFE haemochromatosis"].level == 2),
+                ("HFE C282Y/C282Y", f["HFE"].level == 2),
                 ("MTHFR 677TT via position", f["MTHFR"].data.get("677T") == 2
                  and cs["rs1801133"].via == "position"),
                 ("LCT dosage 1", cs["rs4988235"].dosage == 1 and cs["rs4988235"].flipped != vcf_like),
@@ -1703,6 +1932,68 @@ def selftest() -> int:
             nc = g.by_id.get("rs5")
             ok = got == {"rs6": ("C", "G"), "rs7": ("C", "T"), "rs8": ("A", "T")} and (nc is None or nc.alleles is None)
             check(f"layout {name}", ok, got)
+        g = finalize(load_genome(base, ids, pos), DB)
+        cs, fs = analyse(g)
+        items = entries(cs, fs, show_all=True)
+        split = {True: {e.title for e in items if e.has is True}, False: {e.title for e in items if e.has is False},
+                 None: {e.title for e in items if e.has is None}}
+        expect = {True: ("Dry earwax (ABCC11)", "Lactase persistence (MCM6/LCT)", "Red hair genotype (MC1R R/R)",
+                         "APOE e4 (Alzheimer's risk allele)", "Reduced CYP2C19 function", "Factor V Leiden (F5)",
+                         "Haemochromatosis genotype (HFE C282Y/C282Y)", "PTC/PROP bitter taster (TAS2R38)",
+                         "Reduced DPYD activity (fluoropyrimidine toxicity)", "Reduced TPMT activity (thiopurines)"),
+                  False: ("Male-pattern baldness risk allele (AR)", "Longevity-favouring APOE (e2, no e4)",
+                          "OCA2 R419Q", "HFE H63D"),
+                  None: ("Eye colour (IrisPlex)", "Alpha-actinin-3 deficiency (ACTN3 XX)")}
+        wrong = [(t, k) for k, titles in expect.items() for t in titles if t not in split[k]]
+        check("present/absent/not-determinable classification", not wrong, wrong)
+        for truecolor in (False, True):
+            pal = Palette(truecolor)
+            codes = [pal.take() for _ in range(300)]
+            check(f"title palette unique over 300 titles ({'24-bit' if truecolor else '256-colour'})",
+                  len(set(codes)) == 300)
+        for show_all in (False, True):
+            buf = io.StringIO()
+            ns = argparse.Namespace(color=True, truecolor=False, all=show_all, category=None, min_evidence="D",
+                                    no_sources=True)
+            render_text(g, cs, fs, [], ns, buf)
+            text = buf.getvalue()
+            titles = re.findall(r"\033\[1;(38;[0-9;]+)m(.+?)\033\[0m", text)
+            want = len([e for e in entries(cs, fs, show_all=show_all)
+                        if show_all or (e.in_file and e.has is not False)])
+            present = len([e for e in entries(cs, fs, show_all=show_all) if e.in_file and e.has is True])
+            ok = (len(titles) == want and len({c for c, _ in titles}) == len(titles)
+                  and f"results   {present} trait present" in text
+                  and "FOUND IN YOUR FILE, TRAIT PRESENT" in text
+                  and ("TRAIT NOT PRESENT" in text) == show_all and ("NOT IN YOUR FILE" in text) == show_all
+                  and "Research use" not in text and "\033[4m" not in text)
+            check(f"text report ({'-a' if show_all else 'default'}): sections, bold headings, one colour per title",
+                  ok, (len(titles), want))
+        for alleles, detected in (("G\tG", False), ("A\tG", True)):
+            path = os.path.join(tmp, "cacna1c.txt")
+            with open(path, "w") as fh:
+                fh.write("rsid\tchromosome\tposition\tallele1\tallele2\n")
+                fh.write(f"rs1006737\t12\t2345295\t{alleles}\n")
+            gg = finalize(load_genome(path, wanted([])[0], set()), DB)
+            cc, ff = analyse(gg)
+            outs = {}
+            for show_all in (False, True):
+                buf = io.StringIO()
+                ns = argparse.Namespace(color=False, all=show_all, category=None, min_evidence="D", no_sources=True)
+                render_text(gg, cc, ff, [], ns, buf)
+                outs[show_all] = buf.getvalue()
+            line = f"rs1006737 {alleles.replace(chr(9), '/')} in your file; {int(detected)} " \
+                   f"{'copy' if detected else 'copies'} of trait allele A"
+            section = "TRAIT PRESENT" if detected else "TRAIT NOT PRESENT"
+            ok = (line in outs[True].split(f"FOUND IN YOUR FILE, {section}")[-1]
+                  and (line in outs[False]) == detected)
+            check(f"rs1006737 {alleles.replace(chr(9), '/')}: listed by default only when A is carried", ok,
+                  copies(cc["rs1006737"]))
+            buf = io.StringIO()
+            lookup(gg, cc, ["rs1006737", "rs0000001"], ns, buf)
+            out = buf.getvalue()
+            check(f"--snp lookup rs1006737 {alleles.replace(chr(9), '/')}",
+                  "position 2345295" in out and ("-> trait present" if detected else "-> trait not present") in out
+                  and "rs0000001\n  not in your file" in out, out)
         buf = io.StringIO()
         ns = argparse.Namespace(format="json", pgs=[pgs_path], build=None)
         with contextlib.redirect_stdout(buf):
