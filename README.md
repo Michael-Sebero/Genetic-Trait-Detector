@@ -4,7 +4,7 @@
 git clone https://github.com/Michael-Sebero/Genetic-Trait-Detector && cd Genetic-Trait-Detector && python3 genetic-trait-detector.py --selftest
 ```
 
-Requires Python 3.8 or newer and nothing outside the standard library. `colorama` is optional and only helps colour output on older Windows consoles. The self-test runs 36 pass/fail checks and should end with `selftest: 36/36 passed`.
+Requires Python 3.8 or newer and nothing outside the standard library. `colorama` is optional and only helps colour output on older Windows consoles. The self-test runs 47 pass/fail checks and should end with `selftest: 47/47 passed`.
 
 ## Description
 
@@ -21,17 +21,19 @@ Every variant in the database is stored on the GRCh37 plus strand with its trait
 ## This script detects traits associated with
 
 ```
-Appearance      eye colour (IrisPlex model), red hair (MC1R), blond hair, hair form, skin pigmentation, freckling, male-pattern baldness
+Appearance      eye colour (IrisPlex model), red hair (MC1R), blond hair, hair form, skin pigmentation (SLC45A2, SLC24A5), freckling, male-pattern baldness
 Senses          bitter taste (TAS2R38), cilantro soapiness, asparagus smell, photic sneeze, earwax type, ACTN3 muscle fibre type
 Diet            lactase persistence, caffeine metabolism, FUT2 secretor status, FTO, MC4R, TCF7L2, vitamin D, triglycerides, MTHFR
 Substances      alcohol flush (ALDH2), ADH1B, nicotine dependence (CHRNA5)
-Drug response   CYP2C19, CYP2C9, VKORC1, SLCO1B1, CYP3A5, CYP2D6*4, DPYD, TPMT, NUDT15, HLA-B*57:01
-Health          APOE, factor V Leiden, prothrombin G20210A, HFE haemochromatosis, CCR5-delta32, APP A673T, celiac HLA-DQ, SH2B3
+Drug response   CYP2C19, CYP2C9, VKORC1, CYP4F2, SLCO1B1, ABCG2, CYP3A5, CYP2D6*4, CYP2B6, UGT1A1 (Gilbert syndrome), DPYD, TPMT, NUDT15,
+                G6PD deficiency, NAT2 acetylator status, HLA-B*57:01
+Health          APOE, factor V Leiden, prothrombin G20210A, HFE haemochromatosis, alpha-1 antitrypsin (PI*Z/PI*S), sickle cell and HbC,
+                lipoprotein(a), 9p21 coronary risk, PNPLA3 fatty liver, CCR5-delta32, APP A673T, celiac HLA-DQ, SH2B3
 Neuro           COMT, BDNF, CACNA1C, ANK3
 Longevity       FOXO3, APOE
 ```
 
-`--list` prints the full database of 75 variants with alleles, positions, evidence tiers and sources.
+`--list` prints the full database of 94 variants with alleles, positions, evidence tiers and sources. Every position and allele has been checked against Ensembl GRCh37.
 
 Earlier versions listed autism, schizophrenia, OCD, depression, anxiety and intelligence SNPs. Those were candidate-gene findings that haven't replicated in large studies and no single common SNP predicts these conditions, so they were removed. For polygenic traits, apply a scoring file from the [PGS Catalog](https://www.pgscatalog.org) with `--pgs`.
 
@@ -55,6 +57,12 @@ Each result shows the trait, what it means, your genotype as read from the file 
     Sturm 2008 Am J Hum Genet 82:424; Eiberg 2008 Hum Genet 123:177
 ```
 
+For a report you can open in any browser, search and keep, write it as HTML. The page is a single file with no external resources, so it works offline; it contains your genotypes, so share it with care:
+
+```
+python3 genetic-trait-detector.py /path/to/genome.zip -f html -o report.html
+```
+
 To check exactly what the script read for any rsID, including ones outside the database:
 
 ```
@@ -64,17 +72,19 @@ python3 genetic-trait-detector.py /path/to/genome.zip --snp rs1006737
 Every result title is printed in a colour no other title in the report uses.
 
 ```
--f {text,json,tsv}      output format; json and tsv include every assessed variant
+-f {text,json,tsv,html} output format; json and tsv include every assessed variant, html is a self-contained page
+-o FILE                 write the report to FILE instead of the terminal
 -c CATEGORY             limit output to appearance, senses, diet, substances, drugs, health, neuro or longevity (repeatable)
 -e {A,B,C,D}            hide results weaker than this evidence tier
 -a, --all               also list traits not present, SNPs not in your file and component SNPs
---snp RSID              show exactly what the file holds for an rsID and how it is interpreted (repeatable)
+--snp RSID              show exactly what the file holds for an rsID and how it is interpreted (repeatable, any case)
 --pgs FILE              apply a PGS Catalog scoring file (repeatable)
 --build {36,37,38}      override the detected genome build
 --no-color              disable colour (NO_COLOR is also honoured)
---no-sources            omit literature sources
+--no-sources            omit literature sources (text and html)
 --list                  print the variant database and exit
 --selftest              run the built-in tests and exit
+--version               print the version and exit
 ```
 
 Evidence tiers:

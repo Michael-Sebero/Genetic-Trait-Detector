@@ -13,6 +13,7 @@ and traits not present; every result title gets a colour no other title uses.
   genetic-trait-detector.py genome.zip
   genetic-trait-detector.py genome.zip --snp rs1006737
   genetic-trait-detector.py genome.txt --format json > report.json
+  genetic-trait-detector.py genome.txt --format html -o report.html
   genetic-trait-detector.py genome.txt --pgs PGS000001.txt.gz
   genetic-trait-detector.py --list
   genetic-trait-detector.py --selftest
@@ -23,6 +24,7 @@ import argparse
 import bz2
 import colorsys
 import gzip
+import html
 import io
 import json
 import math
@@ -34,6 +36,8 @@ import tempfile
 import textwrap
 import zipfile
 from dataclasses import dataclass, field
+
+VERSION = "2.1.0"
 
 CATEGORIES = {
     "appearance": ("Appearance & pigmentation", "33"),
@@ -56,6 +60,7 @@ EVIDENCE_SHORT = "A clinical grade | B strong, large effect | C replicated, smal
 
 COMPLEMENT = str.maketrans("ACGT", "TGCA")
 BASES = frozenset("ACGTDI")
+# X outside both pseudoautosomal regions in GRCh37 and GRCh38 (GRCh38 PAR1 end, GRCh37 PAR2 start)
 PAR_X = (2781479, 154931044)
 
 
@@ -92,6 +97,11 @@ def _v(rsid, gene, cat, ref, alt, ev, text, src, loc="", hidden=False, levels="0
 
 MC1R_SRC = "Valverde 1995 Nat Genet 11:328; Sulem 2007 Nat Genet 39:1443"
 IRIS_SRC = "Walsh 2011 Forensic Sci Int Genet 5:170"
+G6PD_SRC = "Gammal 2023 Clin Pharmacol Ther 113:973 (CPIC)"
+NAT2_SRC = "Hein 2012 Pharmacogenomics 13:31"
+AAT_SRC = "Strnad 2020 N Engl J Med 382:1443"
+HBB_SRC = "Piel 2017 N Engl J Med 376:1561"
+LPA_SRC = "Clarke 2009 N Engl J Med 361:2518"
 
 DB = [
     _v("rs12913832", "HERC2", "appearance", "A", "G", "B",
@@ -147,10 +157,12 @@ DB = [
     _v("rs3829241", "TPCN2", "appearance", "G", "A", "C",
        ("no G734E", "G734E: blond-hair-associated allele", "G734E homozygous: two blond-hair-associated alleles"),
        "Sulem 2008 Nat Genet 40:835", "11:68855363", trait="Blond-hair allele (TPCN2 G734E)", has="011"),
-    _v("rs11803731", "TCHH", "appearance", "T", "A", "C",
-       ("no straight-hair allele (curlier hair more likely)", "one straight-hair allele",
-        "two straight-hair alleles; most common European genotype (T/T in gene orientation)"),
-       "Medland 2009 Am J Hum Genet 85:750", "1:152083325", trait="Straight-hair allele (TCHH)", has="011"),
+    _v("rs11803731", "TCHH", "appearance", "A", "T", "C",
+       ("790Leu/Leu: no TCHH straight-hair allele; the usual genotype worldwide",
+        "790Leu/Met: one straight-hair allele; straighter hair on average",
+        "790Met/Met: two straight-hair alleles; straighter hair on average"),
+       "Medland 2009 Am J Hum Genet 85:750; Liu 2018 Hum Mol Genet 27:559", "1:152083325",
+       trait="Straight-hair allele (TCHH 790Met)", has="011"),
     _v("rs3827760", "EDAR", "appearance", "A", "G", "B",
        ("370Val/Val: ancestral EDAR, typical in Europeans and Africans",
         "370Val/Ala: one hair-thickness allele",
@@ -162,8 +174,15 @@ DB = [
         "one lower-risk A allele",
         "lower-risk A allele; A carriers were 24% of non-bald vs 7-13% of bald men"),
        "Hillmer 2005 Am J Hum Genet 77:140; Hayes 2005 Cancer Epidemiol Biomarkers Prev 14:993; "
-       "Zhuo 2012 PMID 21981665",
-       "X:0", trait="Male-pattern baldness risk allele (AR)", has="110"),
+       "Zhuo 2012 Clin Exp Dermatol 37:104",
+       "X:66765627", trait="Male-pattern baldness risk allele (AR)", has="110"),
+    _v("rs1426654", "SLC24A5", "appearance", "G", "A", "B",
+       ("111Ala/Ala: ancestral darker-pigmentation genotype, typical in sub-Saharan Africa and East Asia",
+        "111Ala/Thr: one light-pigmentation allele",
+        "111Thr/Thr: light-pigmentation genotype; near-fixed in Europeans, common in South Asia and the "
+        "Middle East"),
+       "Lamason 2005 Science 310:1782", "15:48426484", trait="Light-pigmentation allele (SLC24A5 111Thr)",
+       has="011"),
 
     _v("rs17822931", "ABCC11", "senses", "C", "T", "B",
        ("wet earwax", "wet earwax (dry-type carrier)", "dry earwax and reduced axillary odour"),
@@ -178,11 +197,13 @@ DB = [
         "likely able to smell asparagus metabolites (dominant OR 0.48 for anosmia)",
         "most likely able to smell asparagus metabolites"),
        "Eriksson 2010 PLoS Genet 6:e1000993", "1:248496863",
-       trait="Can smell asparagus metabolites (OR2M7)", has="011"),
+       trait="Asparagus-smelling allele (OR2M7)", has="011"),
     _v("rs10427255", "ZEB2", "senses", "T", "C", "C",
        ("baseline odds of photic sneeze reflex", "higher odds of photic sneeze reflex (OR 1.32 per C)",
         "highest odds of photic sneeze reflex"),
-       "Eriksson 2010 PLoS Genet 6:e1000993", "2:146125523", trait="Photic sneeze reflex allele (ZEB2)", has="011"),
+       "Eriksson 2010 PLoS Genet 6:e1000993 (European ancestry; a Han Chinese GWAS found the T allele "
+       "associated instead: Wang 2019 Sci Rep 9:4993)", "2:146125523",
+       trait="Photic sneeze reflex allele (ZEB2)", has="011"),
     _v("rs1815739", "ACTN3", "senses", "C", "T", "B",
        ("RR: alpha-actinin-3 present in fast fibres; enriched in sprint/power athletes", "RX: alpha-actinin-3 present",
         "XX: alpha-actinin-3 deficient (~18% of Europeans); under-represented in elite sprinters"),
@@ -292,7 +313,7 @@ DB = [
        "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:97547947", hidden=True, rare=True,
        trait="DPYD c.2846A>T", has="011"),
     _v("rs56038477", "DPYD", "drugs", "C", "T", "A", ("no HapB3", "HapB3 (decreased function)", "HapB3 homozygous"),
-       "Amstutz 2018 Clin Pharmacol Ther 103:210", hidden=True, trait="DPYD HapB3", has="011"),
+       "Amstutz 2018 Clin Pharmacol Ther 103:210", "1:98039419", hidden=True, trait="DPYD HapB3", has="011"),
     _v("rs1800462", "TPMT", "drugs", "C", "G", "A", ("no *2", "*2 (no function)", "*2/*2"),
        "Relling 2019 Clin Pharmacol Ther 105:1095", "6:18143955", hidden=True, rare=True, trait="TPMT*2", has="011"),
     _v("rs1800460", "TPMT", "drugs", "C", "T", "A", ("no 460A", "460A (*3B, or *3A with 719G)", "460A homozygous"),
@@ -305,8 +326,49 @@ DB = [
        ("no NUDT15*3: normal thiopurine tolerance at this site",
         "NUDT15*3 carrier: intermediate metabolizer; reduced thiopurine starting dose",
         "NUDT15*3/*3: poor metabolizer; thiopurines need drastic dose reduction"),
-       "Relling 2019 Clin Pharmacol Ther 105:1095 (CPIC)", levels="022",
+       "Relling 2019 Clin Pharmacol Ther 105:1095 (CPIC)", "13:48619855", levels="022",
        trait="Reduced NUDT15 activity (thiopurines)", has="011"),
+    _v("rs2108622", "CYP4F2", "drugs", "C", "T", "A",
+       ("no CYP4F2*3", "one *3 allele: slightly higher warfarin dose requirement",
+        "*3/*3: higher warfarin dose requirement; CPIC suggests +5-10% in European ancestry"),
+       "Caldwell 2008 Blood 111:4106; Johnson 2017 Clin Pharmacol Ther 102:397 (CPIC)", "19:15990431",
+       trait="Higher warfarin dose allele (CYP4F2*3)", has="011"),
+    _v("rs2231142", "ABCG2", "drugs", "G", "T", "A",
+       ("normal ABCG2 function",
+        "Q141K: decreased ABCG2 function; higher serum urate and gout risk; no rosuvastatin change under CPIC",
+        "Q141K/Q141K: poor ABCG2 function; CPIC suggests a rosuvastatin starting dose of 20 mg or less; "
+        "higher serum urate and gout risk"),
+       "Woodward 2009 Proc Natl Acad Sci USA 106:10338; Cooper-DeHoff 2022 Clin Pharmacol Ther 111:1007 (CPIC)",
+       "4:89052323", levels="011", trait="Reduced ABCG2 function (rosuvastatin, gout)", has="011"),
+    _v("rs3745274", "CYP2B6", "drugs", "G", "T", "A",
+       ("516G/G: no *6/*9 allele", "one 516T (*6 or *9) allele: intermediate metabolizer; CPIC suggests "
+        "efavirenz 400 mg/day", "516T/T: poor metabolizer; CPIC suggests efavirenz 400 or 200 mg/day"),
+       "Desta 2019 Clin Pharmacol Ther 106:726 (CPIC; *4, *18 and other alleles not assessed)", "19:41512841",
+       levels="012", trait="Reduced CYP2B6 function (516T)", has="011"),
+    _v("rs887829", "UGT1A1", "drugs", "C", "T", "A",
+       ("no *80 allele: *28 unlikely", "one *80 allele (tags *28): intermediate metabolizer; bilirubin "
+        "may be mildly raised",
+        "*80/*80 (tags *28/*28): poor metabolizer, the usual Gilbert syndrome genotype (harmless mild "
+        "unconjugated hyperbilirubinaemia); higher risk of atazanavir jaundice and irinotecan toxicity"),
+       "Bosma 1995 N Engl J Med 333:1171; Gammal 2016 Clin Pharmacol Ther 99:363 (CPIC; rs887829 as *28 proxy)",
+       "2:234668570", levels="001", trait="Gilbert syndrome genotype (UGT1A1*28 tag)", has="001"),
+    _v("rs1050828", "G6PD", "drugs", "C", "T", "A",
+       ("no G6PD A- (202A)", "202A heterozygote (female): variable G6PD activity",
+        "G6PD A- (202A), hemizygous or homozygous: G6PD deficient"),
+       G6PD_SRC, "X:153764217", hidden=True, levels="012", trait="G6PD 202A (A-)", has="011"),
+    _v("rs5030868", "G6PD", "drugs", "G", "A", "A",
+       ("no G6PD Mediterranean (563T)", "563T heterozygote (female): variable G6PD activity",
+        "G6PD Mediterranean (563T), hemizygous or homozygous: severe G6PD deficiency"),
+       G6PD_SRC, "X:153762634", hidden=True, rare=True, levels="012", trait="G6PD Mediterranean (563T)",
+       has="011"),
+    _v("rs1801279", "NAT2", "drugs", "G", "A", "B", ("no 191A", "191A (*14, slow)", "191A/191A"),
+       NAT2_SRC, "8:18257704", hidden=True, trait="NAT2 191A (*14)", has="011"),
+    _v("rs1801280", "NAT2", "drugs", "T", "C", "B", ("no 341C", "341C (*5, slow)", "341C/341C"),
+       NAT2_SRC, "8:18257854", hidden=True, trait="NAT2 341C (*5)", has="011"),
+    _v("rs1799930", "NAT2", "drugs", "G", "A", "B", ("no 590A", "590A (*6, slow)", "590A/590A"),
+       NAT2_SRC, "8:18258103", hidden=True, trait="NAT2 590A (*6)", has="011"),
+    _v("rs1799931", "NAT2", "drugs", "G", "A", "B", ("no 857A", "857A (*7, slow)", "857A/857A"),
+       NAT2_SRC, "8:18258370", hidden=True, trait="NAT2 857A (*7)", has="011"),
 
     _v("rs429358", "APOE", "health", "T", "C", "A", ("112Cys/Cys", "112Cys/Arg", "112Arg/Arg"),
        "Corder 1993 Science 261:921", "19:45411941", hidden=True,
@@ -345,6 +407,29 @@ DB = [
        ("no R262W risk allele", "autoimmune risk allele (celiac disease, type 1 diabetes)",
         "two autoimmune risk alleles"),
        "Hunt 2008 Nat Genet 40:395", "12:111884608", trait="Autoimmune risk allele (SH2B3 R262W)", has="011"),
+    _v("rs28929474", "SERPINA1", "health", "C", "T", "A", ("no PI*Z", "PI*Z (E342K)", "PI*Z/PI*Z"),
+       AAT_SRC, "14:94844947", hidden=True, rare=True, trait="SERPINA1 PI*Z", has="011"),
+    _v("rs17580", "SERPINA1", "health", "T", "A", "A", ("no PI*S", "PI*S (E264V)", "PI*S/PI*S"),
+       AAT_SRC, "14:94847262", hidden=True, trait="SERPINA1 PI*S", has="011"),
+    _v("rs334", "HBB", "health", "T", "A", "A", ("no HbS", "HbS (E6V)", "HbS/HbS"),
+       HBB_SRC, "11:5248232", hidden=True, trait="HBB HbS", has="011"),
+    _v("rs33930165", "HBB", "health", "C", "T", "A", ("no HbC", "HbC (E6K)", "HbC/HbC"),
+       HBB_SRC, "11:5248233", hidden=True, rare=True, trait="HBB HbC", has="011"),
+    _v("rs10455872", "LPA", "health", "A", "G", "B", ("no rs10455872 G", "rs10455872 G (high Lp(a))",
+                                                       "rs10455872 G/G"),
+       LPA_SRC, "6:161010118", hidden=True, trait="LPA rs10455872 G", has="011"),
+    _v("rs3798220", "LPA", "health", "T", "C", "B", ("no I4399M", "I4399M (high Lp(a))", "I4399M homozygous"),
+       LPA_SRC, "6:160961137", hidden=True, trait="LPA I4399M", has="011"),
+    _v("rs10757278", "CDKN2B-AS1", "health", "A", "G", "C",
+       ("no 9p21 risk allele", "myocardial infarction OR 1.28 per G allele",
+        "myocardial infarction OR ~1.64 vs A/A"),
+       "Helgadottir 2007 Science 316:1491", "9:22124477", trait="Coronary risk allele (9p21)", has="011"),
+    _v("rs738409", "PNPLA3", "health", "C", "G", "B",
+       ("148Ile/Ile: no PNPLA3 risk allele", "148Ile/Met: more liver fat; higher risk of fatty liver disease "
+        "progression", "148Met/Met: about twice the liver fat of non-carriers; higher risk of fatty-liver "
+        "inflammation and cirrhosis, including alcohol-related"),
+       "Romeo 2008 Nat Genet 40:1461", "22:44324727", levels="001",
+       trait="Fatty liver risk allele (PNPLA3 I148M)", has="011"),
 
     _v("rs4680", "COMT", "neuro", "G", "A", "D",
        ("Val/Val: higher COMT activity", "Val/Met: intermediate COMT activity",
@@ -570,9 +655,13 @@ def _vcf_alleles(ref: str, alt: str, fmt: str, sample: str):
         if a in (".", "*", "") or a.startswith("<"):
             return None
         out.append(a)
-    if all(len(a) == 1 and a in "ACGT" for a in out):
+    real = [a for a in alleles if a not in (".", "*", "") and not a.startswith("<")]
+    # A SNV site has a 1-base REF and at least one 1-base ALT (or no ALT at all); at an indel site a called
+    # 1-base allele is the short (D) allele, e.g. REF TCAG.. ALT T with GT 1/1 is D/D, not T/T.
+    snv_site = len(real[0]) == 1 and (len(real) == 1 or any(len(a) == 1 for a in real[1:]))
+    if snv_site and all(len(a) == 1 and a in "ACGT" for a in out):
         return tuple(sorted(out))
-    lens = {len(a) for a in alleles if a not in (".", "*") and not a.startswith("<")}
+    lens = {len(a) for a in real}
     if len(lens) == 2:
         hi = max(lens)
         return tuple(sorted("I" if len(a) == hi else "D" for a in out))
@@ -587,8 +676,8 @@ def load_genome(path: str, want_ids: set, want_pos: set) -> Genome:
         s = line.strip()
         if not s:
             continue
-        if n == 0 and s.startswith("##fileformat=VCF"):
-            vcf = True
+        if vcf is None:
+            vcf = s.startswith("##fileformat=VCF")
         if vcf:
             if s.startswith("##"):
                 if len(meta) < 5000:
@@ -601,7 +690,7 @@ def load_genome(path: str, want_ids: set, want_pos: set) -> Genome:
             f = s.split("\t")
             if len(f) < 10:
                 continue
-            ids = [x for x in f[2].split(";") if x and x != "."]
+            ids = [x.lower() for x in f[2].split(";") if x and x != "."]
             pos = int(f[1]) if f[1].isdigit() else 0
             alleles = _vcf_alleles(f[3], f[4], f[8], f[9])
             _store(genome, ids, norm_chrom(f[0]), pos, alleles, "/".join(alleles or ("-",)), want_ids, want_pos)
@@ -629,7 +718,7 @@ def load_genome(path: str, want_ids: set, want_pos: set) -> Genome:
                 raise ParseError(f"unrecognised layout near line {n + 1}: {s[:80]!r}")
             schema, mode = found
         f = _fields(s, mode)
-        vid = _pick(f, schema["id"])
+        vid = _pick(f, schema["id"]).lower()
         if not vid:
             continue
         p = _pick(f, schema["pos"])
@@ -663,6 +752,8 @@ def finalize(genome: Genome, db, forced_build: str = ""):
             genome.build_note += f"; but {note}"
     elif checked >= 5 and genome.build == "37":
         genome.build_note += f"; only {agree}/{checked} database positions match GRCh37"
+        if agree / checked < 0.5:
+            genome.build, genome.build_note = "", genome.build_note + ", position matching disabled"
     diploid = genome.x_diploid
     if genome.x_single + diploid >= 50:
         if genome.x_single / (genome.x_single + diploid) >= 0.9:
@@ -683,6 +774,7 @@ class Call:
     flipped: bool = False
     via: str = ""
     unverified: bool = False
+    rec: Record | None = None
 
     def count(self, allele: str):
         if self.status != "ok":
@@ -717,8 +809,14 @@ def call_variant(v: Variant, genome: Genome) -> Call:
     rec, via = None, ""
     for key in (v.rsid,) + v.aliases:
         r = genome.by_id.get(key)
-        if r is not None and (rec is None or rec.alleles is None):
-            rec, via = r, "rsid" if key == v.rsid else key
+        if r is None or (rec is not None and rec.alleles is not None):
+            continue
+        # vendor-internal IDs (i3003626...) are only trusted at the expected GRCh37 position; indel
+        # coordinates depend on how the vendor anchors them, so those get a small window
+        slack = 50 if v.ref in ("I", "D") else 0
+        if key != v.rsid and genome.build == "37" and v.pos and r.pos and abs(r.pos - v.pos) > slack:
+            continue
+        rec, via = r, "rsid" if key == v.rsid else key
     if (rec is None or rec.alleles is None) and genome.build == "37" and v.pos:
         hits = [r for r in genome.by_pos.get((v.chrom, v.pos), []) if r.alleles and orient(v, r.alleles)]
         if hits and len({orient(v, r.alleles)[0] for r in hits}) == 1:
@@ -726,11 +824,11 @@ def call_variant(v: Variant, genome: Genome) -> Call:
     if rec is None:
         return Call(v)
     if rec.alleles is None:
-        return Call(v, "nocall", raw=rec.raw, via=via)
+        return Call(v, "nocall", raw=rec.raw, via=via, rec=rec)
     oriented = orient(v, rec.alleles)
     if oriented is None:
-        return Call(v, "conflict", (), rec.raw, False, via)
-    return Call(v, "ok", oriented[0], rec.raw, oriented[1], via)
+        return Call(v, "conflict", (), rec.raw, False, via, rec=rec)
+    return Call(v, "ok", oriented[0], rec.raw, oriented[1], via, rec=rec)
 
 
 class CallSet(dict):
@@ -1014,7 +1112,7 @@ def f_cyp2c19(cs):
 
 
 def f_cyp2c9(cs):
-    src = "Johnson 2017 Clin Pharmacol Ther 102:397 (CPIC)"
+    src = "Johnson 2017 Clin Pharmacol Ther 102:397; Theken 2020 Clin Pharmacol Ther 108:191 (CPIC)"
     ids = ("rs1799853", "rs1057910")
     title, basis = "Reduced CYP2C9 function", _basis(cs, ids)
     n2, n3 = cs.n("rs1799853"), cs.n("rs1057910")
@@ -1090,7 +1188,149 @@ def f_tpmt(cs):
     return [Finding("drugs", "TPMT", title, total > 0, basis, text, "A", src, level, {"tpmt": dip})]
 
 
-FINDERS = (f_irisplex, f_mc1r, f_tas2r38, f_mthfr, f_cyp2c19, f_cyp2c9, f_dpyd, f_tpmt, f_apoe, f_hfe, f_celiac)
+def f_g6pd(cs):
+    """X-linked: a hemizygous male call counts as two copies, so 2 = deficient in either sex."""
+    ids = ("rs1050828", "rs5030868")
+    title, basis = "G6PD deficiency variant", _basis(cs, ids)
+    a, m = cs.n("rs1050828"), cs.n("rs5030868")
+    if a is None and m is None:
+        return [_na("drugs", "G6PD", title, basis, "A", G6PD_SRC, list(ids))]
+    found = [n for n, k in (("A- (202A)", a), ("Mediterranean (563T)", m)) if k]
+    total = (a or 0) + (m or 0)
+    if total >= 2:
+        title, level = "G6PD deficient", 2
+        text = "deficient (hemizygous male, or homozygous/compound heterozygous female): avoid rasburicase, " \
+               "pegloticase, dapsone, methylene blue and high-dose primaquine/tafenoquine; risk of haemolysis " \
+               "with some antimalarials, sulfonamides and fava beans"
+    elif total == 1:
+        title, level = "G6PD deficiency carrier (heterozygous)", 1
+        text = "one deficiency allele: in a female, G6PD activity ranges from normal to deficient " \
+               "(X-inactivation), so CPIC advises an enzyme activity test before high-risk drugs"
+    else:
+        level = 0
+        text = "no tested deficiency variant; hundreds of other G6PD variants are not on consumer chips"
+    if found:
+        text += " [" + ", ".join(found) + "; confirm with an enzyme activity test]"
+    miss = [n for n, k in (("202A", a), ("563T", m)) if k is None]
+    return [Finding("drugs", "G6PD", title, total > 0, basis, text + _untested(miss), "A", G6PD_SRC, level,
+                    {"deficiency_alleles": total, "variants": found})]
+
+
+def f_serpina1(cs):
+    ids = ("rs28929474", "rs17580")
+    title, basis = "Alpha-1 antitrypsin deficiency alleles (SERPINA1)", _basis(cs, ids)
+    z, s = cs.n("rs28929474"), cs.n("rs17580")
+    if z is None:
+        return [_na("health", "SERPINA1", title, basis, "A", AAT_SRC, ["rs28929474"])]
+    s0 = s or 0
+    pi = ""
+    if z + s0 <= 2:
+        alleles = ["Z"] * z + ["S"] * s0
+        pi = "PI*" + "".join(sorted(alleles + ["M"] * (2 - len(alleles)), key="MSZ".index))
+    if not pi:
+        text, level = "more than two deficiency alleles; verify genotyping", 1
+    elif pi == "PI*ZZ":
+        title, level = "Alpha-1 antitrypsin deficiency (PI*ZZ)", 2
+        text = "severe deficiency (serum AAT ~10-15% of normal): high risk of early emphysema, especially " \
+               "with smoking, and of liver disease; confirm with a serum AAT level and phenotyping"
+    elif pi == "PI*SZ":
+        title, level = "Alpha-1 antitrypsin deficiency (PI*SZ)", 2
+        text = "moderate deficiency (serum AAT ~40% of normal): raised emphysema risk, mainly in smokers; " \
+               "confirm with a serum AAT level"
+    elif pi == "PI*MZ":
+        title, level = "Alpha-1 antitrypsin carrier (PI*MZ)", 1
+        text = "carrier with mildly reduced AAT: modestly higher COPD risk in smokers and higher liver " \
+               "disease risk alongside other liver insults; relevant to family planning"
+    elif pi == "PI*SS":
+        title, level = "Alpha-1 antitrypsin PI*SS", 0
+        text = "mildly reduced AAT (~60% of normal); no clear disease risk"
+    elif pi == "PI*MS":
+        title, level = "Alpha-1 antitrypsin carrier (PI*MS)", 0
+        text = "S carrier: AAT level near normal; no meaningful disease risk"
+    else:
+        level, text = 0, "PI*MM at the Z and S sites; rarer deficiency alleles are not tested"
+    text += "" if s is not None else " (PI*S not genotyped)"
+    return [Finding("health", "SERPINA1", title, z + s0 > 0, basis, text, "A", AAT_SRC, level,
+                    {"pi": pi or None, "Z": z, "S": s})]
+
+
+def f_hbb(cs):
+    ids = ("rs334", "rs33930165")
+    title, basis = "Haemoglobin S/C (HBB)", _basis(cs, ids)
+    hs, hc = cs.n("rs334"), cs.n("rs33930165")
+    if hs is None:
+        return [_na("health", "HBB", title, basis, "A", HBB_SRC, ["rs334"])]
+    c0 = hc or 0
+    if hs + c0 > 2:
+        text, level = "more than two HbS/HbC alleles; verify genotyping", 1
+    elif hs == 2:
+        title, level, text = "Sickle cell disease genotype (HbSS)", 2, "HbSS: sickle cell anaemia genotype"
+    elif hs == 1 and c0 == 1:
+        title, level, text = "Sickle cell disease genotype (HbSC)", 2, "HbSC disease genotype"
+    elif hs == 1:
+        title, level = "Sickle cell trait (HbAS)", 1
+        text = "sickle cell carrier: usually no symptoms; rare complications with extreme exertion, " \
+               "dehydration or altitude; relevant to family planning"
+    elif c0 == 2:
+        title, level, text = "Haemoglobin C disease genotype (HbCC)", 1, "HbCC: mild haemolytic anaemia"
+    elif c0 == 1:
+        title, level, text = "Haemoglobin C trait (HbAC)", 0, "HbC carrier: no symptoms; relevant to family planning"
+    else:
+        level, text = 0, "no HbS or HbC; beta-thalassaemia and other haemoglobin variants are not tested"
+    if hs + c0:
+        text += "; confirm with haemoglobin electrophoresis"
+    text += "" if hc is not None else " (HbC not genotyped)"
+    return [Finding("health", "HBB", title, hs + c0 > 0, basis, text, "A", HBB_SRC, level, {"S": hs, "C": hc})]
+
+
+NAT2 = (("rs1801280", "*5"), ("rs1799930", "*6"), ("rs1799931", "*7"), ("rs1801279", "*14"))
+
+
+def f_nat2(cs):
+    """Each slow NAT2 haplotype carries one of these tag SNPs, so the slow-allele count is their sum."""
+    title, basis = "Slow NAT2 acetylator", _basis(cs, [r for r, _ in NAT2])
+    k = {name: cs.n(rsid) for rsid, name in NAT2}
+    core = [r for r, name in NAT2[:3] if k[name] is None]
+    if core:
+        return [_na("drugs", "NAT2", title, basis, "B", NAT2_SRC, core)]
+    slow = sum(v or 0 for v in k.values())
+    tags = [n if c == 1 else f"{n} x2" for n, c in k.items() if c]
+    if slow >= 2:
+        phen, level = "slow acetylator", 1
+    elif slow == 1:
+        phen, level, title = "intermediate acetylator", 0, "Intermediate NAT2 acetylator"
+    else:
+        phen, level, title = "rapid acetylator", 0, "Reduced NAT2 acetylation"
+    text = phen + (f" [{', '.join(tags)}]" if tags else " (no slow-allele tag)")
+    text += "; relevant to isoniazid (hepatotoxicity in slow acetylators), hydralazine, sulfasalazine"
+    if slow > 2:
+        text += "; more than two slow-allele tags, phase unknown"
+    text += _untested(["*14 (191A)"] if k["*14"] is None else [])
+    return [Finding("drugs", "NAT2", title, slow > 0, basis, text, "B", NAT2_SRC, level,
+                    {"phenotype": phen, "slow_alleles": slow})]
+
+
+def f_lpa(cs):
+    ids = ("rs10455872", "rs3798220")
+    title, basis = "High lipoprotein(a) variants (LPA)", _basis(cs, ids)
+    a, b = cs.n("rs10455872"), cs.n("rs3798220")
+    if a is None and b is None:
+        return [_na("health", "LPA", title, basis, "B", LPA_SRC, list(ids))]
+    n = (a or 0) + (b or 0)
+    if n >= 2:
+        level, text = 1, "two or more LPA risk alleles: coronary disease OR 2.57 vs none"
+    elif n == 1:
+        level, text = 1, "one LPA risk allele: coronary disease OR 1.51 vs none"
+    else:
+        level, text = 0, "neither tested LPA risk allele"
+    text += "; a one-off Lp(a) blood test shows the actual level, which these two SNPs only partly explain"
+    miss = [r for r, k in zip(ids, (a, b)) if k is None]
+    return [Finding("health", "LPA", title, n > 0, basis, text + _untested(miss), "B", LPA_SRC, level,
+                    {"risk_alleles": n})]
+
+
+FINDERS = (f_irisplex, f_mc1r, f_tas2r38, f_mthfr, f_cyp2c19, f_cyp2c9, f_dpyd, f_tpmt, f_g6pd, f_nat2, f_apoe,
+           f_hfe, f_celiac, f_serpina1, f_hbb, f_lpa)
 
 
 def resolve_strand(genome: Genome, cs: CallSet):
@@ -1184,7 +1424,7 @@ class PGS:
         for i in self.i_rs:
             v = self._cell(f, i)
             if v and v != "NA":
-                return v
+                return v.lower()
         return ""
 
     def locus(self, f):
@@ -1340,6 +1580,10 @@ def copies(c: Call) -> str:
     return f"{v.rsid} {c.genotype} in your file; {note}"
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
 def sentence(text: str) -> str:
     if re.match(r"[a-z]{2,}\b", text):
         text = text[0].upper() + text[1:]
@@ -1414,6 +1658,7 @@ class Entry:
     meta: str
     src: str
     in_file: bool
+    ev: str = "D"
 
 
 def entries(cs, findings, category=None, min_evidence="D", show_all=False):
@@ -1424,7 +1669,7 @@ def entries(cs, findings, category=None, min_evidence="D", show_all=False):
         for f in findings:
             if f.cat == cat and _ev_ok(f.ev, min_evidence):
                 meta = f"{f.basis}; evidence {f.ev} ({EV_WORDS[f.ev]})"
-                out.append(Entry(f.title, f.has, cat, f.text, f.level, meta, f.src, f.level >= 0))
+                out.append(Entry(f.title, f.has, cat, f.text, f.level, meta, f.src, f.level >= 0, f.ev))
         for c in cs.values():
             v = c.v
             if v.cat != cat or not _ev_ok(v.ev, min_evidence) or (v.hidden and not show_all and c.status != "conflict"):
@@ -1432,11 +1677,11 @@ def entries(cs, findings, category=None, min_evidence="D", show_all=False):
             text, level, notes = call_text(c)
             meta = "; ".join([copies(c), f"evidence {v.ev} ({EV_WORDS[v.ev]})"] + notes)
             has = v.has[c.dosage] == "1" if c.status == "ok" else None
-            out.append(Entry(v.trait, has, cat, text, level, meta, v.src, c.status in ("ok", "conflict")))
+            out.append(Entry(v.trait, has, cat, text, level, meta, v.src, c.status in ("ok", "conflict"), v.ev))
     return out
 
 
-SECTIONS = (("TRAITS PRESENT", lambda e: e.in_file and e.has is True),
+SECTIONS = (("FOUND IN YOUR FILE, TRAIT PRESENT", lambda e: e.in_file and e.has is True),
             ("FOUND IN YOUR FILE, TRAIT NOT PRESENT", lambda e: e.in_file and e.has is False),
             ("FOUND IN YOUR FILE, INCONCLUSIVE", lambda e: e.in_file and e.has is None),
             ("NOT IN YOUR FILE OR NO-CALL", lambda e: not e.in_file))
@@ -1463,7 +1708,7 @@ def render_text(genome, cs, findings, pgs_results, args, out):
     w(f"coverage  {n['ok']} of {len(calls)} database SNPs found in your file, {flips} strand-flipped, "
       f"{n['conflict']} conflicts\n")
     present, absent, unclear, missing = (g for _, g in groups)
-    summary = f"{len(present)} trait present" + (f", {len(unclear)} inconclusive" if unclear else "")
+    summary = f"{_plural(len(present), 'trait')} present" + (f", {len(unclear)} inconclusive" if unclear else "")
     rest = f"{len(absent)} not present, {len(missing)} not in your file"
     w(f"results   {summary}; {rest}" + ("" if args.all else " (-a lists them)") + "\n")
     if genome.strand == "minus":
@@ -1509,16 +1754,18 @@ def render_text(genome, cs, findings, pgs_results, args, out):
 def lookup(genome, cs, rsids, args, out):
     """Show exactly what the file holds for each requested rsID and how the database reads it."""
     st = Style(args.color)
-    for rsid in rsids:
-        rec = genome.by_id.get(rsid)
+    def where(rec, how=""):
+        gt = "/".join(rec.alleles) if rec.alleles else "no-call"
+        return (f"  in your file{how}: chromosome {rec.chrom or '?'}, position {rec.pos or '?'}, raw {rec.raw!r}, "
+                f"parsed {gt}\n")
+
+    for rsid in (r.strip().lower() for r in rsids):
+        rec, c = genome.by_id.get(rsid), cs.get(rsid)
         out.write("\n" + st("1", rsid) + "\n")
-        if rec is None:
-            out.write("  not in your file\n")
-        else:
-            gt = "/".join(rec.alleles) if rec.alleles else "no-call"
-            out.write(f"  in your file: chromosome {rec.chrom or '?'}, position {rec.pos or '?'}, raw {rec.raw!r}, "
-                      f"parsed {gt}\n")
-        c = cs.get(rsid)
+        out.write(where(rec) if rec is not None else "  not in your file under this rsID\n")
+        if c is not None and c.rec is not None and c.rec is not rec:
+            how = " (matched by GRCh37 position)" if c.via == "position" else f" (listed as {c.via})"
+            out.write(where(c.rec, how))
         if c is None:
             out.write("  not in the trait database\n")
             continue
@@ -1526,7 +1773,8 @@ def lookup(genome, cs, rsids, args, out):
         v = c.v
         verdict = {True: "trait present", False: "trait not present"}.get(
             v.has[c.dosage] == "1" if c.status == "ok" else None, "not determinable")
-        out.write(f"  database: {v.trait}; {v.gene} {v.ref}>{v.alt}, trait allele {trait_allele(v)}\n")
+        out.write(f"  database: {v.trait}; {v.gene} {v.ref}>{v.alt} (GRCh37 {v.chrom}:{v.pos or '?'}), "
+                  f"trait allele {trait_allele(v)}\n")
         out.write(f"  result: {copies(c)} -> {verdict}\n")
         out.write(f"  {sentence(text)}" + (f" [{'; '.join(notes)}]" if notes else "") + "\n")
         out.write("  " + st("2", v.src) + "\n")
@@ -1584,6 +1832,109 @@ def render_tsv(genome, cs, findings, pgs_results, args, out):
         out.write("\t".join(map(str, row)) + "\n")
 
 
+HTML_CSS = """
+:root{--bg:#fbfaf7;--card:#fff;--fg:#1d1d1f;--muted:#6b6b70;--line:#e3e1dc;--accent:#2f5d8a;
+--l1:#b7791f;--l2:#c0392b;--chip:#f0eee9}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--card:#1d1d21;--fg:#ececef;--muted:#9a9aa2;
+--line:#303036;--accent:#7fb0e0;--l1:#e0a845;--l2:#ef6f61;--chip:#26262b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 16px 64px}h1{font-size:1.6rem;margin:0 0 12px}
+h2{font-size:1.15rem;margin:32px 0 4px;border-bottom:1px solid var(--line);padding-bottom:6px}
+h3{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:20px 0 8px}
+dl.meta{display:grid;grid-template-columns:max-content 1fr;gap:2px 16px;margin:0;font-size:.9rem}
+dl.meta dt{color:var(--muted)}dl.meta dd{margin:0;overflow-wrap:anywhere}
+.warn{border-left:3px solid var(--l1);padding:6px 10px;margin:10px 0;background:var(--chip)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}.chip{background:var(--chip);border-radius:999px;
+padding:3px 12px;font-size:.85rem}
+input[type=search]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;
+background:var(--card);color:var(--fg);font:inherit;margin-top:8px}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--line);border-radius:8px;
+padding:10px 14px;margin:8px 0}.card.l1{border-left-color:var(--l1)}.card.l2{border-left-color:var(--l2)}
+.card.l-1{opacity:.75}.card h4{margin:0 0 4px;font-size:1rem}.card p{margin:2px 0}
+.card .why{color:var(--muted);font-size:.85rem}.card .src{color:var(--muted);font-size:.8rem;font-style:italic}
+.ev{display:inline-block;font-size:.72rem;font-weight:600;border:1px solid var(--line);border-radius:4px;
+padding:0 5px;margin-left:6px;vertical-align:2px;color:var(--muted)}
+details>summary{cursor:pointer;margin-top:28px;font-weight:600;font-size:1.05rem}
+table{border-collapse:collapse;width:100%;font-size:.88rem}td,th{text-align:left;padding:4px 8px;
+border-bottom:1px solid var(--line)}footer{margin-top:40px;color:var(--muted);font-size:.85rem}
+.hide{display:none}@media print{input[type=search]{display:none}}
+"""
+
+HTML_JS = """
+const q=document.getElementById('q');
+q.addEventListener('input',()=>{const t=q.value.trim().toLowerCase();
+document.querySelectorAll('.card').forEach(c=>c.classList.toggle('hide',!!t&&!c.textContent.toLowerCase().includes(t)));
+document.querySelectorAll('.cat,.group').forEach(g=>g.classList.toggle('hide',!g.querySelector('.card:not(.hide)')));
+if(t)document.querySelectorAll('details').forEach(d=>d.open=true);});
+"""
+
+
+def render_html(genome, cs, findings, pgs_results, args, out):
+    """Self-contained HTML report: no external resources, so it can be opened offline and kept private."""
+    e = html.escape
+    items = entries(cs, findings, getattr(args, "category", None), getattr(args, "min_evidence", "D"),
+                    getattr(args, "all", False))
+    groups = [(label, [x for x in items if test(x)]) for label, test in SECTIONS]
+    calls = list(cs.values())
+    n_ok = sum(c.status == "ok" for c in calls)
+    build = {"36": "NCBI36", "37": "GRCh37", "38": "GRCh38"}.get(genome.build, "build unknown")
+    rate = genome.nocalls / genome.markers if genome.markers else 0.0
+    w = out.write
+    w('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+      '<meta name="viewport" content="width=device-width, initial-scale=1">'
+      f"<title>Genetic trait report</title><style>{HTML_CSS}</style></head><body><main>\n")
+    w("<h1>Genetic trait report</h1>\n<dl class=\"meta\">")
+    for k, v in (("file", genome.path), ("data", f"{genome.fmt}, {build}, sex {genome.sex}, "
+                                                  f"{genome.markers:,} markers ({rate:.1%} no-call)"),
+                 ("coverage", f"{n_ok} of {len(calls)} database SNPs found in your file"),
+                 ("tool", f"genetic-trait-detector {VERSION}")):
+        w(f"<dt>{e(k)}</dt><dd>{e(v)}</dd>")
+    w("</dl>\n")
+    if genome.strand in ("minus", "mixed"):
+        w(f'<p class="warn">File strand: {e(genome.strand)}. A/T and C/G SNPs were '
+          + ("complemented." if genome.strand == "minus" else "flagged as unverifiable.") + "</p>\n")
+    if "only" in genome.build_note or "but" in genome.build_note:
+        w(f'<p class="warn">Build check: {e(genome.build_note)}</p>\n')
+    w('<div class="chips">' + "".join(f'<span class="chip">{e(label.split(", ")[-1].capitalize())}: '
+                                      f"{len(g)}</span>" for label, g in groups) + "</div>\n")
+    w('<input type="search" id="q" placeholder="Filter results (gene, rsID, trait, drug...)" '
+      'aria-label="Filter results">\n')
+
+    def card(x):
+        src = "" if getattr(args, "no_sources", False) else f'<p class="src">{e(x.src)}</p>'
+        return (f'<article class="card l{x.level}"><h4>{e(x.title)}'
+                f'<span class="ev" title="evidence tier: {e(EVIDENCE[x.ev])}">{e(x.ev)}</span></h4>'
+                f'<p>{e(sentence(x.text))}</p><p class="why">{e(x.meta)}</p>{src}</article>\n')
+
+    for i in (0, 2, 1, 3):  # present and inconclusive open; not present and not in file collapsed
+        label, group = groups[i]
+        if not group:
+            continue
+        heading = f"{e(label.capitalize())} ({len(group)})"
+        w(f'<section class="group"><h2>{heading}</h2>\n' if i in (0, 2)
+          else f'<details class="group"><summary>{heading}</summary>\n')
+        for cat, (cat_label, _) in CATEGORIES.items():
+            block = [x for x in group if x.cat == cat]
+            if block:
+                w(f'<div class="cat"><h3>{e(cat_label)}</h3>\n' + "".join(card(x) for x in block) + "</div>\n")
+        w("</section>\n" if i in (0, 2) else "</details>\n")
+    if pgs_results:
+        w("<section><h2>Polygenic scores</h2><table><tr><th>score</th><th>trait</th><th>matched</th>"
+          "<th>raw score</th><th>z / percentile</th></tr>\n")
+        for r in pgs_results:
+            zp = f"{r['z']:+.2f} / ~{r['percentile']:.0f}" if "z" in r else "n/a (no allele frequencies)"
+            w(f"<tr><td>{e(str(r['id']))}</td><td>{e(r['trait'])}</td><td>{r['matched']:,} of "
+              f"{r['variants']:,}</td><td>{r['score']:.6g}</td><td>{e(zp)}</td></tr>\n")
+        w("</table></section>\n")
+    w("<footer><p><strong>Evidence tiers.</strong> " + " &middot; ".join(f"{k}: {e(v)}" for k, v in EVIDENCE.items())
+      + "</p><p>This report is for research and education and does not diagnose any condition. Consumer chips "
+        "have a high false-positive rate for rare variants (Weedon 2021, BMJ 372:n214); confirm anything "
+        "medically relevant, including all drug-response and health results, with a clinical-grade test. "
+        "The file contains your genotypes: share it with care.</p></footer>\n")
+    w(f"</main><script>{HTML_JS}</script></body></html>\n")
+
+
 def list_db(args, out=sys.stdout):
     st = Style(args.color)
     for cat, (label, color) in CATEGORIES.items():
@@ -1598,14 +1949,16 @@ def list_db(args, out=sys.stdout):
             out.write(f"  {v.rsid:<11} {v.gene:<9} {v.ref}>{v.alt}  [{v.ev}] {loc:<13} {v.trait}"
                       f"{' (component)' if v.hidden else ''}  {st('2', v.src)}\n")
     out.write("\ncompound calls: " + ", ".join(f.__name__[2:] for f in FINDERS) + "\n")
-    out.write("alleles: GRCh37 plus strand, ref>effect\n")
+    out.write(f"{len(DB)} variants; alleles: GRCh37 plus strand, other>effect\n")
 
 
 def build_parser():
     p = argparse.ArgumentParser(prog="genetic-trait-detector",
                                 description="Offline trait and variant report for consumer raw DNA files.")
     p.add_argument("file", nargs="?", help="raw genotype file (.txt/.csv/.tsv/.vcf, optionally .gz/.bz2/.zip)")
-    p.add_argument("-f", "--format", choices=("text", "json", "tsv"), default="text")
+    p.add_argument("-f", "--format", choices=("text", "json", "tsv", "html"), default="text",
+                   help="report format; html is a self-contained page that works offline")
+    p.add_argument("-o", "--output", metavar="FILE", help="write the report to FILE instead of standard output")
     p.add_argument("-c", "--category", action="append", choices=list(CATEGORIES),
                    help="limit output to a category (repeatable)")
     p.add_argument("-e", "--min-evidence", choices=tuple(EV_ORDER), default="D",
@@ -1618,10 +1971,10 @@ def build_parser():
                    help="apply a PGS Catalog scoring file (repeatable)")
     p.add_argument("--build", choices=("36", "37", "38"), help="override the detected genome build")
     p.add_argument("--no-color", action="store_true", help="disable colour (NO_COLOR is also honoured)")
-    p.add_argument("--no-sources", action="store_true", help="omit literature sources in text output")
+    p.add_argument("--no-sources", action="store_true", help="omit literature sources in text and HTML output")
     p.add_argument("--list", action="store_true", help="print the variant database and exit")
     p.add_argument("--selftest", action="store_true", help="run built-in tests and exit")
-    p.add_argument("--version", action="version", version=f"%(prog)s")
+    p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     return p
 
 
@@ -1638,14 +1991,14 @@ def wanted(pgs_list):
 def run(path, args, out):
     pgs_list = [PGS(p) for p in args.pgs]
     ids, pos = wanted(pgs_list)
-    snps = [s.strip() for s in getattr(args, "snp", []) if s.strip()]
+    snps = [s.strip().lower() for s in getattr(args, "snp", []) if s.strip()]
     genome = finalize(load_genome(path, ids | set(snps), pos), DB, args.build or "")
     cs, findings = analyse(genome)
     if snps:
         lookup(genome, cs, snps, args, out)
         return genome, cs, findings, []
     pgs_results = [s.score(genome) for s in pgs_list]
-    {"text": render_text, "json": render_json, "tsv": render_tsv}[args.format](
+    {"text": render_text, "json": render_json, "tsv": render_tsv, "html": render_html}[args.format](
         genome, cs, findings, pgs_results, args, out)
     return genome, cs, findings, pgs_results
 
@@ -1659,7 +2012,7 @@ def main(argv=None) -> int:
     if args.selftest:
         return selftest()
     args.color = (args.format == "text" and not args.no_color and not os.environ.get("NO_COLOR")
-                  and sys.stdout.isatty())
+                  and not args.output and sys.stdout.isatty())
     args.truecolor = truecolor_supported()
     if args.color and os.name == "nt":
         try:
@@ -1667,30 +2020,41 @@ def main(argv=None) -> int:
             colorama.just_fix_windows_console()
         except Exception:
             os.system("")
-    if args.list:
-        try:
-            list_db(args)
-        except BrokenPipeError:
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return 0
+    # with -o the report is built in memory and only written once it is complete
+    out = io.StringIO() if args.output else sys.stdout
     path = args.file
-    if not path:
-        if not sys.stdin.isatty():
-            print("error: no input file given", file=sys.stderr)
-            return 2
-        path = input("Enter DNA data file location: ").strip().strip("'\"")
-    path = os.path.expanduser(path)
-    if not os.path.isfile(path):
-        print(f"error: file not found: {path}", file=sys.stderr)
-        return 2
     try:
-        run(path, args, sys.stdout)
+        if args.list:
+            list_db(args, out)
+        else:
+            if not path:
+                if not sys.stdin.isatty():
+                    print("error: no input file given", file=sys.stderr)
+                    return 2
+                try:
+                    path = input("Enter DNA data file location: ").strip().strip("'\"")
+                except (EOFError, KeyboardInterrupt):
+                    print("", file=sys.stderr)
+                    return 130
+            path = os.path.expanduser(path)
+            if not os.path.isfile(path):
+                print(f"error: file not found: {path}", file=sys.stderr)
+                return 2
+            run(path, args, out)
     except BrokenPipeError:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return 1
+        return 0 if args.list else 1
     except (OSError, EOFError, ParseError, zipfile.BadZipFile, ValueError) as e:
         print(f"error: {path}: {e}", file=sys.stderr)
         return 2
+    if args.output:
+        try:
+            with open(os.path.expanduser(args.output), "w", encoding="utf-8") as fh:
+                fh.write(out.getvalue())
+        except OSError as e:
+            print(f"error: cannot write {args.output}: {e.strerror or e}", file=sys.stderr)
+            return 2
+        print(f"report written to {args.output}", file=sys.stderr)
     return 0
 
 
@@ -1819,9 +2183,11 @@ def selftest() -> int:
     vcf = [(("A", "AGC", "GT", "0/1"), ("D", "I")), (("A", ".", "GT", "0/0"), ("A", "A")),
            ((".", "C", "GT", "1/1"), ("C", "C")), (("C", ".", "GT", "./."), None),
            (("G", "T,C", "GT:DP", "1/2:9"), ("C", "T")), (("A", "G", "GT", "1"), ("G",)),
-           (("A", "<DEL>", "GT", "0/1"), None)]
+           (("A", "<DEL>", "GT", "0/1"), None), (("TCAGT", "T", "GT", "1/1"), ("D", "D")),
+           (("A", "AGC", "GT", "0/0"), ("D", "D")), (("A", "G,AT", "GT", "0/2"), ("D", "I")),
+           (("A", "G,AT", "GT", "0|1"), ("A", "G"))]
     bad = [a for a, want in vcf if _vcf_alleles(*a) != want]
-    check("VCF genotype decoding incl. indel D/I and haploid", not bad, bad)
+    check("VCF genotype decoding incl. indel D/I, 1-base deletion ALT and haploid", not bad, bad)
 
     counts = {"rs12913832": 1, "rs1800407": 0, "rs12896399": 0, "rs16891982": 0, "rs1393350": 1, "rs12203592": 1}
     p = irisplex(counts)
@@ -1852,6 +2218,30 @@ def selftest() -> int:
     check("TPMT *3A/*3A poor metabolizer", tp.data.get("tpmt") == "*3A/*3A" and "poor" in tp.text, tp.text)
     ta = f_tas2r38(fake({"rs713598": "GG", "rs1726866": "AG", "rs10246939": "CC"}))[0]
     check("TAS2R38 inconsistent haplotypes flagged", "rare haplotype" in ta.text, ta.text)
+    tchh = {gt: entries(fake({"rs11803731": gt}), [], show_all=True)[0].has for gt in ("AA", "AT", "TT")}
+    check("TCHH straight-hair allele is plus-strand T (790Met)", tchh == {"AA": False, "AT": True, "TT": True},
+          tchh)
+    g6 = {gt: f_g6pd(fake({"rs1050828": gt, "rs5030868": "GG"}))[0].title for gt in ("T", "CT", "TT", "C")}
+    check("G6PD: hemizygous/homozygous deficient, heterozygous carrier",
+          g6 == {"T": "G6PD deficient", "TT": "G6PD deficient", "CT": "G6PD deficiency carrier (heterozygous)",
+                 "C": "G6PD deficiency variant"}, g6)
+    aat_want = {("CC", "TT"): "PI*MM", ("CT", "TT"): "PI*MZ", ("TT", "TT"): "PI*ZZ", ("CT", "AT"): "PI*SZ",
+                ("CC", "AT"): "PI*MS", ("CC", "AA"): "PI*SS"}
+    bad = {k: f_serpina1(fake({"rs28929474": k[0], "rs17580": k[1]}))[0].data.get("pi") for k in aat_want}
+    check("SERPINA1 PI type table", bad == aat_want, bad)
+    hb_want = {("TT", "CC"): "Haemoglobin S/C (HBB)", ("AT", "CC"): "Sickle cell trait (HbAS)",
+               ("AA", "CC"): "Sickle cell disease genotype (HbSS)", ("AT", "CT"): "Sickle cell disease genotype (HbSC)"}
+    bad = {k: f_hbb(fake({"rs334": k[0], "rs33930165": k[1]}))[0].title for k in hb_want}
+    check("HBB HbS/HbC genotypes", bad == hb_want, bad)
+    nat = {}
+    for label, gts in (("rapid", ("TT", "GG", "GG", "GG")), ("intermediate", ("CT", "GG", "GG", "GG")),
+                       ("slow", ("CT", "AG", "GG", "GG"))):
+        nat[label] = f_nat2(fake(dict(zip(("rs1801280", "rs1799930", "rs1799931", "rs1801279"), gts))))[0]
+    check("NAT2 acetylator status from slow-allele tags",
+          all(f.data["phenotype"] == f"{k} acetylator" for k, f in nat.items()) and nat["slow"].has, nat)
+    lp = [f_lpa(fake({"rs10455872": a, "rs3798220": b}))[0].data["risk_alleles"]
+          for a, b in (("AA", "TT"), ("AG", "TT"), ("AG", "CT"))]
+    check("LPA risk allele count", lp == [0, 1, 2], lp)
     pal = call_variant(DB_BY_ID["rs16891982"], Genome("x", by_id={"rs16891982": Record("5", 1, ("A", "T"), "AT")}))
     check("palindromic C/G SNP is never strand-flipped", pal.status == "conflict", pal.status)
 
@@ -1962,7 +2352,7 @@ def selftest() -> int:
                         if show_all or (e.in_file and e.has is not False)])
             present = len([e for e in entries(cs, fs, show_all=show_all) if e.in_file and e.has is True])
             ok = (len(titles) == want and len({c for c, _ in titles}) == len(titles)
-                  and f"results   {present} trait present" in text
+                  and f"results   {_plural(present, 'trait')} present" in text
                   and "FOUND IN YOUR FILE, TRAIT PRESENT" in text
                   and ("TRAIT NOT PRESENT" in text) == show_all and ("NOT IN YOUR FILE" in text) == show_all
                   and "Research use" not in text and "\033[4m" not in text)
@@ -1994,6 +2384,44 @@ def selftest() -> int:
             check(f"--snp lookup rs1006737 {alleles.replace(chr(9), '/')}",
                   "position 2345295" in out and ("-> trait present" if detected else "-> trait not present") in out
                   and "rs0000001\n  not in your file" in out, out)
+        buf = io.StringIO()
+        lookup(g, cs, ["RS1801133"], ns, buf)
+        out = buf.getvalue()
+        check("--snp lookup shows a record matched by position", "matched by GRCh37 position" in out
+              and "position 11856378" in out and "-> trait present" in out, out)
+
+        def rewrite(src, dst, edit):
+            with open(src) as fh:
+                text = fh.read()
+            with open(dst, "w", newline="") as fh:
+                fh.write(edit(text))
+            return finalize(load_genome(dst, ids, pos), DB)
+
+        g2 = rewrite(base, os.path.join(tmp, "alias.txt"), lambda t: t.replace("i3002432\t11\t46761055",
+                                                                               "i3002432\t11\t46700000"))
+        check("vendor ID at an unexpected GRCh37 position is ignored",
+              analyse(g2)[0]["rs1799963"].status == "absent" and g2.build == "37")
+        g3 = rewrite(base, os.path.join(tmp, "shifted.txt"),
+                     lambda t: re.sub(r"^([^#\t]+\t[^\t]+\t)(\d+)", lambda m: m.group(1) + str(int(m.group(2)) + 7),
+                                      t, flags=re.M))
+        check("header build 37 contradicted by positions: position matching disabled",
+              g3.build == "" and "disabled" in g3.build_note and analyse(g3)[0]["rs1801133"].status == "absent",
+              g3.build_note)
+        g4 = rewrite(files["VCF"], os.path.join(tmp, "blank.vcf"), lambda t: "\n" + t.replace("\trs", "\tRS"))
+        c4 = analyse(g4)[0]
+        check("VCF after a blank first line, upper-case IDs", g4.fmt.startswith("VCF")
+              and c4["rs4988235"].dosage == 1 and c4["rs333"].genotype == "D/I", g4.fmt)
+        html_path = os.path.join(tmp, "report.html")
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = main([base, "-f", "html", "-o", html_path])
+        with open(html_path, encoding="utf-8") as fh:
+            page = fh.read()
+        titles = [e.title for e in entries(cs, fs) if e.in_file and e.has is True]
+        ok = (rc == 0 and page.startswith("<!doctype html>") and page.rstrip().endswith("</html>")
+              and all(html.escape(t) in page for t in titles) and "Alzheimer&#x27;s" in page
+              and not re.search(r"""(src|href)\s*=\s*["']?https?:""", page) and "<link" not in page
+              and page.count("<details") == page.count("</details>") > 0)
+        check("HTML report via -o: complete, escaped, no external resources", ok, rc)
         buf = io.StringIO()
         ns = argparse.Namespace(format="json", pgs=[pgs_path], build=None)
         with contextlib.redirect_stdout(buf):
